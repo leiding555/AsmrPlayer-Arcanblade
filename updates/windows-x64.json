@@ -1,0 +1,10 @@
+{
+  "schema": 1,
+  "stable": {
+    "tag": "v0.1.4",
+    "size": 42597872,
+    "sha256": "e59aba8fea28afd2b29b98fbfface76719d29ed40c7c2043fcfeeac24298a55b",
+    "notes": "桌面和手机端支持作品搜索，支持 MP3／WAV 内嵌封面，并修复部分带内嵌封面的 MP3 播放停在开头的问题。"
+  },
+  "prerelease": null
+}
