@@ -86,6 +86,7 @@ const offlineStore = (() => {
     const file = crypto.randomUUID();
     try {
       const previous = await index("readonly", store => store.get(record.id));
+      if (!record.workFolderName && previous?.workFolderName) record.workFolderName = previous.workFolderName;
       if (previous?.crc === record.crc && previous.size === record.size
           && previous.mime === source.mime) source.previous = await getFile(previous).catch(() => null);
       if (!source.previous) {
@@ -98,6 +99,7 @@ const offlineStore = (() => {
       if (result.unchanged) {
         if (JSON.stringify(previous.subtitles) === JSON.stringify(record.subtitles)
             && previous.coverCrc === record.coverCrc && previous.workName === record.workName
+            && (previous.workFolderName || "") === record.workFolderName
             && previous.trackName === record.trackName && previous.order === record.order) return "skipped";
         await index("readwrite", store => store.put({ ...record, mime: previous.mime, file: previous.file }));
         return "updated";
@@ -122,7 +124,8 @@ const offlineStore = (() => {
           signal.throwIfAborted();
           const subtitles = await pack.readSubtitles(track.subtitles);
           const outcome = await save({ id: `${pack.workId}/${track.id}`, workId: pack.workId, workName: pack.workName,
-            trackName: track.name, order: track.order, size: track.entry.size, crc: track.entry.crc,
+            workFolderName: pack.workFolderName, trackName: track.name, order: track.order,
+            size: track.entry.size, crc: track.entry.crc,
             subtitles, cover: pack.cover, coverCrc: pack.coverCrc },
           { blob: track.entry.blob, expectedCrc: track.entry.crc, mime: track.mime }, signal);
           progress(outcome);

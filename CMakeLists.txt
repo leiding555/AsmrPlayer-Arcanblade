@@ -330,6 +330,7 @@ set(_library_subtitle_playback_sources
 
 add_library(AsmrArtwork STATIC
     src/artwork/CoverArtLoader.h src/artwork/CoverArtLoader.cpp
+    src/artwork/EmbeddedCoverReader.h src/artwork/EmbeddedCoverReader.cpp
     src/artwork/CoverArtService.h src/artwork/CoverArtService.cpp
     src/artwork/WorkCoverService.h src/artwork/WorkCoverService.cpp
     src/artwork/ManualCoverStore.h src/artwork/ManualCoverStore.cpp

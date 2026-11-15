@@ -71,10 +71,12 @@ public:
         const std::shared_ptr<std::atomic_bool> &cancelled = {},
         CoverArtCache *cache = nullptr);
 private:
-    [[nodiscard]] static CoverArtResult loadImage(
+    enum class FileSource { Image, Embedded };
+    [[nodiscard]] static CoverArtResult loadFile(
         const QString &rootPath, const QString &relativePath, bool forceReload,
         const CoverArtOptions &options,
-        const std::shared_ptr<std::atomic_bool> &cancelled, CoverArtCache *cache);
+        const std::shared_ptr<std::atomic_bool> &cancelled, CoverArtCache *cache,
+        FileSource source = FileSource::Image);
 };
 
 } // namespace asmr

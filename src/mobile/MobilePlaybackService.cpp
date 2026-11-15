@@ -101,6 +101,11 @@ bool supportedAudio(const LibraryFile &file)
             || file.extension.compare(QStringLiteral("wav"), Qt::CaseInsensitive) == 0);
 }
 
+QString workFolderName(const LibraryWork &work)
+{
+    return QFileInfo(QDir::cleanPath(QDir::fromNativeSeparators(work.rootPath))).fileName();
+}
+
 QString resolvedPath(const QString &path)
 {
     std::error_code error;
@@ -245,8 +250,11 @@ struct MobilePlaybackService::Run {
         }
         QJsonArray items;
         for (const auto &work : result.works) {
-            items.append(QJsonObject{{QStringLiteral("id"), QString::number(work.id)},
-                                     {QStringLiteral("name"), work.displayName}});
+            QJsonObject item{{QStringLiteral("id"), QString::number(work.id)},
+                             {QStringLiteral("name"), work.displayName}};
+            const auto folderName = workFolderName(work);
+            if (!folderName.isEmpty()) item.insert(QStringLiteral("folder_name"), folderName);
+            items.append(item);
         }
         json(response, {{QStringLiteral("works"), items}});
     }
@@ -458,9 +466,11 @@ struct MobilePlaybackService::Run {
                         {QStringLiteral("audio"), QString::fromLatin1(audioName)},
                         {QStringLiteral("subtitles"), QString::fromLatin1(subtitleName)}});
                 }
-                const QJsonObject manifest{{QStringLiteral("format"), QStringLiteral("arcanblade-offline")},
+                QJsonObject manifest{{QStringLiteral("format"), QStringLiteral("arcanblade-offline")},
                     {QStringLiteral("version"), 1}, {QStringLiteral("work_id"), QString::fromLatin1(workKey)},
                     {QStringLiteral("work_name"), work.displayName}, {QStringLiteral("tracks"), tracks}};
+                const auto folderName = workFolderName(work);
+                if (!folderName.isEmpty()) manifest.insert(QStringLiteral("work_folder_name"), folderName);
                 if (!zip.add("manifest.json", QJsonDocument(manifest).toJson(QJsonDocument::Compact))
                     || !zip.finish()) return false;
                 sink.done();

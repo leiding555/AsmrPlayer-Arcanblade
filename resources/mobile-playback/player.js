@@ -69,6 +69,24 @@ function saveScroll() {
   }
 }
 
+function setWorkSearchFields(card, name, folderName) {
+  card.dataset.searchName = name.toLowerCase();
+  card.dataset.searchFolder = (folderName ?? "").toLowerCase();
+}
+
+function filterWorks(page, list) {
+  const input = element(`${page}-search`);
+  const query = input.value.trim().toLowerCase();
+  let hasMatch = false;
+  for (const card of list.children) {
+    const matches = !query || card.dataset.searchName.includes(query) || card.dataset.searchFolder.includes(query);
+    card.hidden = !matches;
+    hasMatch ||= matches;
+  }
+  element(`${page}-search-clear`).disabled = !input.value;
+  element(`${page}-search-empty`).hidden = !query || !list.children.length || hasMatch;
+}
+
 function setRoute(next, depth, push) {
   const entry = { ...next, home, depth, key: Array.from(crypto.getRandomValues(new Uint32Array(2))).join("-") };
   if (push) history.pushState(entry, "");
@@ -206,6 +224,7 @@ async function showWorks(initial = false) {
     for (const item of result.works) {
       const card = document.createElement("button");
       card.className = "work-card";
+      setWorkSearchFields(card, item.name, item.folder_name);
       const image = document.createElement("img");
       image.src = `/api/works/${item.id}/cover`;
       image.alt = "";
@@ -215,6 +234,7 @@ async function showWorks(initial = false) {
       card.addEventListener("click", () => navigate({ page: "work", item }));
       grid.append(card);
     }
+    filterWorks("library", grid);
     connection.textContent = result.works.length ? "" : "作品库为空。";
     element("batch-open").disabled = !libraryWorks.length;
     view("library");
@@ -413,6 +433,7 @@ function showExport() {
     const article = document.createElement("article");
     article.className = "export-work";
     article.dataset.workId = item.id;
+    setWorkSearchFields(article, item.name, item.folder_name);
     const heading = document.createElement("div");
     heading.className = "export-work-heading";
     const label = document.createElement("label");
@@ -448,6 +469,7 @@ function showExport() {
     container.append(article);
     renderExportGroup(group);
   }
+  filterWorks("export", container);
   updateExportSummary();
 }
 
@@ -794,10 +816,12 @@ async function showOffline(workId = null) {
   connection.textContent = "";
   view("offline");
   element("offline-heading").textContent = "离线库";
+  element("offline-search-box").hidden = !!workId || !offlineReady;
   const list = element("offline-tracks");
   list.replaceChildren();
   const grid = element("offline-works");
   grid.replaceChildren();
+  filterWorks("offline", grid);
   for (const url of offlineCoverUrls) URL.revokeObjectURL(url);
   offlineCoverUrls = [];
   updateImportControls();
@@ -819,6 +843,8 @@ async function showOffline(workId = null) {
       for (const [id, records] of works) {
         const card = document.createElement("button");
         card.className = "work-card";
+        const folderName = records.find(record => record.workFolderName)?.workFolderName;
+        setWorkSearchFields(card, records[0].workName, folderName);
         const image = document.createElement("img");
         const url = records[0].cover ? URL.createObjectURL(records[0].cover) : "mark.png";
         if (records[0].cover) offlineCoverUrls.push(url);
@@ -828,6 +854,7 @@ async function showOffline(workId = null) {
         card.addEventListener("click", () => navigate({ page: "offline", workId: id }));
         grid.append(card);
       }
+      filterWorks("offline", grid);
     }
     const used = entries.reduce((sum, record) => sum + record.size + (record.cover?.size ?? 0), 0);
     element("offline-usage").textContent = entries.length
@@ -975,6 +1002,16 @@ element("refresh").addEventListener("click", () => {
   exportWorks = new Map();
   void renderRoute(route);
 });
+for (const [page, listId] of [["library", "works"], ["export", "export-works"], ["offline", "offline-works"]]) {
+  const input = element(`${page}-search`);
+  const list = element(listId);
+  input.addEventListener("input", () => filterWorks(page, list));
+  element(`${page}-search-clear`).addEventListener("click", () => {
+    input.value = "";
+    input.focus({ preventScroll: true });
+    filterWorks(page, list);
+  });
+}
 element("tracks-button").addEventListener("click", back);
 element("batch-open").addEventListener("click", () => navigate({ page: "export" }));
 element("package-open").addEventListener("click", openPackageSelection);

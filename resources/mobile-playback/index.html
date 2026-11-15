@@ -41,10 +41,24 @@
           <button id="refresh">刷新</button>
         </div>
       </div>
+      <div class="work-search">
+        <div class="work-search-controls">
+          <input id="library-search" type="search" aria-label="搜索作品" placeholder="搜索作品" autocomplete="off" spellcheck="false" aria-controls="works">
+          <button id="library-search-clear" type="button" aria-label="清空搜索" disabled>清空</button>
+        </div>
+        <p id="library-search-empty" role="status" hidden>未找到匹配的作品。</p>
+      </div>
       <div id="works"></div>
     </section>
     <section id="export" hidden>
       <h1>导出到离线库</h1>
+      <div class="work-search">
+        <div class="work-search-controls">
+          <input id="export-search" type="search" aria-label="搜索作品" placeholder="搜索作品" autocomplete="off" spellcheck="false" aria-controls="export-works">
+          <button id="export-search-clear" type="button" aria-label="清空搜索" disabled>清空</button>
+        </div>
+        <p id="export-search-empty" role="status" hidden>未找到匹配的作品。</p>
+      </div>
       <div id="export-works"></div>
       <div class="export-actions">
         <span id="export-size" aria-live="polite"></span>
@@ -79,6 +93,13 @@
           </label>
           <button id="cancel-import" type="button" hidden>取消导入</button>
         </div>
+      </div>
+      <div class="work-search" id="offline-search-box" hidden>
+        <div class="work-search-controls">
+          <input id="offline-search" type="search" aria-label="搜索作品" placeholder="搜索作品" autocomplete="off" spellcheck="false" aria-controls="offline-works">
+          <button id="offline-search-clear" type="button" aria-label="清空搜索" disabled>清空</button>
+        </div>
+        <p id="offline-search-empty" role="status" hidden>未找到匹配的作品。</p>
       </div>
       <section id="install-help" aria-labelledby="install-heading" hidden>
         <h2 id="install-heading">添加离线库到桌面</h2>

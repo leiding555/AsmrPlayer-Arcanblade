@@ -132,8 +132,11 @@ const offlineZip = (() => {
     const cover = entries.get("cover.png");
     const image = await metadata(cover, 16 * 1024 ** 2);
     if (image.length < 8 || view(image).getBigUint64(0) !== 0x89504e470d0a1a0an) throw invalid();
-    return { workId: info.work_id, workName: info.work_name, cover: new Blob([image], { type: "image/png" }),
-      coverCrc: cover.crc, tracks, async readSubtitles(entry) {
+    const folderName = info.work_folder_name;
+    const workFolderName = typeof folderName === "string" && folderName !== "." && folderName !== ".."
+      && !/[\\/\0]/.test(folderName) ? folderName : "";
+    return { workId: info.work_id, workName: info.work_name, workFolderName,
+      cover: new Blob([image], { type: "image/png" }), coverCrc: cover.crc, tracks, async readSubtitles(entry) {
         const payload = await decode(entry, 64 * 1024 ** 2);
         if (!payload || !["none", "disabled", "unavailable", "ready"].includes(payload.state)
             || !Array.isArray(payload.entries) || (payload.state !== "ready" && payload.entries.length)

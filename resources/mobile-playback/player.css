@@ -73,6 +73,18 @@ h1 { margin: .45rem 0 .8rem; font-size: 1.45rem; overflow-wrap: anywhere; }
   background: var(--surface);
   letter-spacing: .15em;
 }
+.work-search { margin-bottom: .75rem; }
+.work-search-controls { display: flex; gap: .5rem; }
+.work-search input {
+  flex: 1;
+  min-width: 0;
+  padding: .45rem .75rem;
+  border: 1px solid var(--border);
+  background: var(--surface);
+  color: inherit;
+}
+.work-search input::-webkit-search-cancel-button { display: none; }
+.work-search p { margin: .65rem 0 0; color: var(--muted); }
 #works, #offline-works { display: grid; grid-template-columns: repeat(auto-fill, minmax(8.5rem, 1fr)); gap: .75rem; }
 .work-card { text-align: left; overflow-wrap: anywhere; min-width: 0; padding: .5rem; }
 .work-card img, #cover {

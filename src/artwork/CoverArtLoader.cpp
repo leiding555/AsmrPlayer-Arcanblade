@@ -1,15 +1,16 @@
 #include "artwork/CoverArtLoader.h"
+#include "artwork/EmbeddedCoverReader.h"
 #include "artwork/ManagedCoverFile.h"
 
 #include "library/NaturalSort.h"
 #include "library/ScanRootStore.h"
 
+#include <QBuffer>
 #include <QDateTime>
 #include <QDir>
 #include <QFile>
 #include <QFileInfo>
 #include <QImageReader>
-#include <QSet>
 #include <QVector>
 
 #include <algorithm>
@@ -80,6 +81,11 @@ bool supportedSuffix(const QString &path)
 {
     return supported(QFileInfo(path).suffix().toLatin1());
 }
+bool embeddedCoverSuffix(const QString &suffix)
+{
+    return suffix.compare(u"mp3", Qt::CaseInsensitive) == 0
+        || suffix.compare(u"wav", Qt::CaseInsensitive) == 0;
+}
 int namePriority(const QFileInfo &info, const QString &audioStem)
 {
     const auto stem = info.completeBaseName().toCaseFolded();
@@ -105,6 +111,27 @@ QString cacheKey(const fs::path &canonical, const QFileInfo &info, const QSize &
         + QString::number(info.lastModified().toMSecsSinceEpoch()) + QLatin1Char('|')
         + QString::number(size.width()) + QLatin1Char('x') + QString::number(size.height());
 }
+
+QImage readThumbnail(QImageReader &reader, const QSize &original, const QSize &thumbnailSize)
+{
+    const int side = qMax(thumbnailSize.width(), thumbnailSize.height());
+    if (original.width() > side && original.height() > side)
+        reader.setScaledSize(original.scaled(QSize(side, side), Qt::KeepAspectRatioByExpanding));
+    QImage image = reader.read(); // Animation intentionally uses frame zero.
+    if (image.isNull()) return {};
+    // Crop before scaling so very thin images cannot create huge intermediates.
+    int cropWidth = image.width(), cropHeight = image.height();
+    if (qint64(cropWidth) * thumbnailSize.height() > qint64(cropHeight) * thumbnailSize.width())
+        cropWidth = qMax(1, static_cast<int>(qint64(cropHeight)
+            * thumbnailSize.width() / thumbnailSize.height()));
+    else
+        cropHeight = qMax(1, static_cast<int>(qint64(cropWidth)
+            * thumbnailSize.height() / thumbnailSize.width()));
+    image = image.copy((image.width() - cropWidth) / 2, (image.height() - cropHeight) / 2,
+        cropWidth, cropHeight).scaled(thumbnailSize, Qt::IgnoreAspectRatio, Qt::SmoothTransformation);
+    if (!image.isNull()) image.setDevicePixelRatio(1.0);
+    return image;
+}
 }
 
 CoverArtCache::CoverArtCache(int maximumBytes) : m_images(qMax(0, maximumBytes)) {}
@@ -112,15 +139,20 @@ int CoverArtCache::totalCost() const { return static_cast<int>(m_images.totalCos
 int CoverArtCache::maximumCost() const { return static_cast<int>(m_images.maxCost()); }
 void CoverArtCache::clear() { m_images.clear(); }
 
-CoverArtResult CoverArtLoader::loadImage(const QString &root, const QString &relativePath,
+CoverArtResult CoverArtLoader::loadFile(const QString &root, const QString &relativePath,
     bool forceReload, const CoverArtOptions &options,
-    const std::shared_ptr<std::atomic_bool> &cancelled, CoverArtCache *cache)
+    const std::shared_ptr<std::atomic_bool> &cancelled, CoverArtCache *cache, FileSource source)
 {
-    const auto failure = [] { return result(CoverArtStatus::Error,
-        QStringLiteral("封面图片不存在、不可读取或超出安全限制。")); };
+    const bool embedded = source == FileSource::Embedded;
+    const auto failure = [embedded] {
+        return embedded ? result(CoverArtStatus::NotFound, {})
+                        : result(CoverArtStatus::Error, QStringLiteral("封面图片不存在、不可读取或超出安全限制。"));
+    };
     if (isCancelled(cancelled)) return result(CoverArtStatus::Cancelled, {});
     const auto relative = ManualCoverStore::normalizeRelativePath(relativePath);
-    if (relative.isEmpty() || !supportedSuffix(relative)) return failure();
+    const auto suffix = QFileInfo(relative).suffix();
+    if (relative.isEmpty() || !(embedded ? embeddedCoverSuffix(suffix) : supported(suffix.toLatin1())))
+        return failure();
     std::error_code error;
     const auto rootStatus = fs::symlink_status(nativePath(root), error);
     if (error || !fs::is_directory(rootStatus) || linked(QFileInfo(root), rootStatus)) return failure();
@@ -142,51 +174,51 @@ CoverArtResult CoverArtLoader::loadImage(const QString &root, const QString &rel
     const QString path = qtPath(current);
     const QFileInfo info(path);
     const auto physical = fs::canonical(current, error);
-    if (error || info.size() <= 0 || info.size() > options.maxFileBytes) return failure();
+    if (error || info.size() <= 0 || (!embedded && info.size() > options.maxFileBytes)) return failure();
     QFile file(path);
-    if (!file.open(QIODevice::ReadOnly) || file.size() <= 0 || file.size() > options.maxFileBytes)
-        return failure();
-    QImageReader reader(&file);
-    reader.setDecideFormatFromContent(true);
-    reader.setAutoTransform(true);
-    const QSize original = reader.size();
-    if (!supported(reader.format()) || !reader.canRead()
-        || original.width() <= 0 || original.height() <= 0
-        || qint64(original.width()) * original.height() > options.maxPixels) return failure();
-    const QString key = cacheKey(physical, info, options.thumbnailSize);
-    if (cache && !forceReload) {
-        if (auto *cached = cache->m_images.object(key)) {
-            if (isCancelled(cancelled)) return result(CoverArtStatus::Cancelled, {});
-            return {CoverArtStatus::Ready, *cached, path, {}, true};
-        }
+    if (!file.open(QIODevice::ReadOnly) || file.size() != info.size()) return failure();
+    QString key = cacheKey(physical, info, options.thumbnailSize);
+    if (embedded) {
+        // Cached audio covers bypass tag reads, so reuse only under the same limits.
+        key += u'|' + QString::number(options.maxFileBytes) + u'|' + QString::number(options.maxPixels);
     }
-    const int side = qMax(options.thumbnailSize.width(), options.thumbnailSize.height());
-    if (original.width() > side && original.height() > side)
-        reader.setScaledSize(original.scaled(QSize(side, side), Qt::KeepAspectRatioByExpanding));
-    QImage image = reader.read(); // Animation intentionally uses frame zero.
+    const auto *cached = cache && !forceReload ? cache->m_images.object(key) : nullptr;
+    const auto decode = [&](QIODevice &data) -> QImage {
+        QImageReader reader(&data);
+        reader.setDecideFormatFromContent(true);
+        reader.setAutoTransform(true);
+        const QSize original = reader.size();
+        if (!supported(reader.format()) || !reader.canRead()
+            || original.width() <= 0 || original.height() <= 0
+            || qint64(original.width()) * original.height() > options.maxPixels)
+            return {};
+        return cached ? *cached : readThumbnail(reader, original, options.thumbnailSize);
+    };
+
+    QImage image;
+    if (!embedded) {
+        image = decode(file);
+    } else if (cached) {
+        image = *cached;
+    } else {
+        const bool wave = suffix.compare(u"wav", Qt::CaseInsensitive) == 0;
+        (void)visitEmbeddedCoverImages(file, wave, options.maxFileBytes, cancelled, [&](const QByteArray &bytes) {
+            QBuffer buffer;
+            buffer.setData(bytes);
+            if (!buffer.open(QIODevice::ReadOnly)) return false;
+            image = decode(buffer);
+            return !image.isNull();
+        });
+    }
     if (isCancelled(cancelled)) return result(CoverArtStatus::Cancelled, {});
     if (image.isNull()) return failure();
-    // Crop before scaling so very thin images cannot create huge intermediates.
-    int cropWidth = image.width(), cropHeight = image.height();
-    if (qint64(cropWidth) * options.thumbnailSize.height()
-        > qint64(cropHeight) * options.thumbnailSize.width())
-        cropWidth = qMax(1, static_cast<int>(qint64(cropHeight)
-            * options.thumbnailSize.width() / options.thumbnailSize.height()));
-    else
-        cropHeight = qMax(1, static_cast<int>(qint64(cropWidth)
-            * options.thumbnailSize.height() / options.thumbnailSize.width()));
-    image = image.copy((image.width() - cropWidth) / 2, (image.height() - cropHeight) / 2,
-        cropWidth, cropHeight).scaled(options.thumbnailSize, Qt::IgnoreAspectRatio, Qt::SmoothTransformation);
-    if (image.isNull()) return failure();
-    image.setDevicePixelRatio(1.0);
-    if (isCancelled(cancelled)) return result(CoverArtStatus::Cancelled, {});
     const QFileInfo after(path);
     if (after.size() != info.size() || after.lastModified() != info.lastModified()
         || file.size() != info.size()) return failure();
-    if (cache && image.sizeInBytes() <= cache->m_images.maxCost()
+    if (cache && !cached && image.sizeInBytes() <= cache->m_images.maxCost()
         && image.sizeInBytes() <= std::numeric_limits<int>::max())
         cache->m_images.insert(key, new QImage(image), static_cast<int>(image.sizeInBytes()));
-    return {CoverArtStatus::Ready, image, path, {}, false};
+    return {CoverArtStatus::Ready, image, path, {}, cached != nullptr};
 }
 
 CoverArtResult CoverArtLoader::loadSelected(const QString &rootPath, const QString &relativePath,
@@ -251,9 +283,9 @@ CoverArtResult CoverArtLoader::load(const CoverArtRequest &request,
         auto selected = managedChoice
             ? (managedPath.isEmpty() ? result(CoverArtStatus::Error,
                    QStringLiteral("封面副本不存在或不可读取。"))
-                : loadImage(QFileInfo(managedPath).absolutePath(), QFileInfo(managedPath).fileName(),
+                : loadFile(QFileInfo(managedPath).absolutePath(), QFileInfo(managedPath).fileName(),
                     request.forceReload, options, cancelled, cache))
-            : loadImage(root, manualPath, request.forceReload, options, cancelled, cache);
+            : loadFile(root, manualPath, request.forceReload, options, cancelled, cache);
         selected.manualRelativePath = manualPath;
         if (selected.status == CoverArtStatus::Ready) {
             selected.manual = true;
@@ -276,7 +308,9 @@ CoverArtResult CoverArtLoader::load(const CoverArtRequest &request,
 
     const auto audioStem = request.libraryWork ? QString{}
         : QFileInfo(request.audioPath).completeBaseName().toCaseFolded();
+    const QDir rootDirectory(root);
     QVector<fs::path> directories{rootPath};
+    QVector<Candidate> audioCandidates;
     qsizetype entries = 0;
     qsizetype attempted = 0;
     bool hadFailure = false;
@@ -311,9 +345,13 @@ CoverArtResult CoverArtLoader::load(const CoverArtRequest &request,
                 else if (!linked(info, entryStatus)) {
                     if (fs::is_directory(entryStatus) && depth < maximumDepth)
                         nextDirectories.append(entry.path());
-                    else if (fs::is_regular_file(entryStatus) && supportedSuffix(path))
-                        candidates.append({path, namePriority(info, audioStem),
-                                           NaturalSortKey(QDir(root).relativeFilePath(path))});
+                    else if (fs::is_regular_file(entryStatus)) {
+                        const auto relative = rootDirectory.relativeFilePath(path);
+                        if (supportedSuffix(path))
+                            candidates.append({relative, namePriority(info, audioStem), NaturalSortKey(relative)});
+                        else if (request.libraryWork && embeddedCoverSuffix(info.suffix()))
+                            audioCandidates.append({relative, 0, NaturalSortKey(relative)});
+                    }
                 }
                 iterator.increment(error);
                 if (error) { hadFailure = true; error.clear(); break; }
@@ -327,13 +365,31 @@ CoverArtResult CoverArtLoader::load(const CoverArtRequest &request,
             if (attempted >= options.maxCandidates)
                 return finish(result(CoverArtStatus::LimitExceeded, QStringLiteral("封面候选解码达到上限。")));
             ++attempted;
-            auto loaded = loadImage(root, QDir(root).relativeFilePath(candidate.path),
-                request.forceReload, options, cancelled, cache);
+            auto loaded = loadFile(root, candidate.path, request.forceReload, options, cancelled, cache);
             if (loaded.status == CoverArtStatus::Ready || loaded.status == CoverArtStatus::Cancelled)
                 return finish(std::move(loaded));
             hadFailure = true;
         }
         directories = std::move(nextDirectories);
+    }
+    if (request.libraryWork) {
+        std::sort(audioCandidates.begin(), audioCandidates.end(), [](const auto &a, const auto &b) {
+            return a.key.compare(b.key) < 0;
+        });
+    } else if (QDir::isAbsolutePath(request.audioPath)) {
+        const auto relative = rootDirectory.relativeFilePath(QDir::cleanPath(request.audioPath));
+        if (embeddedCoverSuffix(QFileInfo(relative).suffix()))
+            audioCandidates.append({relative, 0, NaturalSortKey(relative)});
+    }
+    attempted = 0;
+    for (const auto &candidate : audioCandidates) {
+        if (isCancelled(cancelled)) return result(CoverArtStatus::Cancelled, {});
+        if (attempted >= options.maxCandidates)
+            return finish(result(CoverArtStatus::LimitExceeded, QStringLiteral("内嵌封面音轨检查达到上限。")));
+        ++attempted;
+        auto loaded = loadFile(root, candidate.path, request.forceReload, options, cancelled, cache, FileSource::Embedded);
+        if (loaded.status == CoverArtStatus::Ready || loaded.status == CoverArtStatus::Cancelled)
+            return finish(std::move(loaded));
     }
     return finish(hadFailure ? result(CoverArtStatus::Error, QStringLiteral("未找到可读取的封面图片。"))
                       : result(CoverArtStatus::NotFound, QStringLiteral("暂无封面。")));

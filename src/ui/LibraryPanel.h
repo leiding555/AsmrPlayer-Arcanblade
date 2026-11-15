@@ -17,6 +17,7 @@ class QCheckBox;
 class QAction;
 class QHBoxLayout;
 class QLabel;
+class QLineEdit;
 class QModelIndex;
 class QListView;
 class QMenu;
@@ -159,7 +160,7 @@ private:
     void showCategoryContextMenu(const QModelIndex &index, const QPoint &globalPosition);
     void invalidateCategoryContextMenu();
     void setSidebarLocation(bool categories, qint64 categoryId = 0);
-    void updateCategoryFilter();
+    void updateCategoryFilter(bool resetSearch = false);
     void rebuildCategoryRows();
     void publishCategoryCoverDemand(bool force);
     [[nodiscard]] bool canMutateCategories() const;
@@ -199,6 +200,7 @@ private:
     LibraryWorksModel *m_worksModel = nullptr;
     LibraryWorksFilterModel *m_worksFilter = nullptr;
     LibraryTrackTreeModel *m_tracksModel = nullptr;
+    QLineEdit *m_workSearchEdit = nullptr;
     QListView *m_worksView = nullptr;
     QListView *m_categoriesView = nullptr;
     QStandardItemModel *m_categoriesModel = nullptr;
