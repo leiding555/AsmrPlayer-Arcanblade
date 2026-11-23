@@ -211,8 +211,6 @@ void MainWindow::showScanRootManager()
         connect(m_scanRootManagerDialog, &ScanRootManagerDialog::hidden, this, [this] {
             if (m_scanRootRemovalConfirmation) m_scanRootRemovalConfirmation->reject();
         });
-        connect(m_scanRootManagerDialog, &ScanRootManagerDialog::refreshRootRequested,
-                this, [this](const QString &root) { startRootRefresh({root}); });
         connect(m_scanRootManagerDialog, &ScanRootManagerDialog::refreshAllRequested,
                 this, [this] { startRootRefresh(m_scanRootStore->roots()); });
         connect(m_scanRootManagerDialog, &ScanRootManagerDialog::startupScanChanged,
@@ -472,6 +470,7 @@ void MainWindow::forgetRemovedLibraryWork(qint64 workId)
     m_progressHasQueuedSave = false;
     m_playingLibraryWorkId = 0;
     m_playingLibraryFileId = 0;
+    updateFavoriteButton();
     m_libraryPanel->setPlayingTrack(0, 0);
     resetBoundSubtitleContext();
     m_subtitleQueryPending = false;

@@ -570,6 +570,7 @@ void MainWindow::startQueuePreparation()
                             result.entry.workName = snapshot.work.displayName;
                             result.entry.relativePath = file->relativePath;
                             result.entry.displayName = file->fileName;
+                            result.replacement = request.replacement;
                             result.entryId = request.entryId;
                             result.success = true;
                         }

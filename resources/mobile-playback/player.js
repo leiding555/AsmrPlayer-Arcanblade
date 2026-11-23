@@ -3,6 +3,7 @@
 const element = id => document.getElementById(id);
 const views = ["pairing", "library", "export", "work", "offline", "player"];
 const audio = element("audio");
+const playbackMode = element("playback-mode");
 const connection = element("connection");
 const playbackStatus = element("playback-status");
 const subtitles = element("subtitles");
@@ -11,6 +12,10 @@ const subtitleCues = element("subtitle-cues");
 const resumeSubtitles = element("resume-subtitles");
 const subtitlePipButton = element("subtitle-pip");
 const subtitlePipStatus = element("subtitle-pip-status");
+const subtitlePipDiagnostics = element("subtitle-pip-diagnostics");
+const subtitlePipReport = element("subtitle-pip-report");
+const pipRequirementsMessage = "字幕画中画检测未通过。";
+const pipRetryMessage = "字幕画面已准备，请再次点击「字幕画中画」打开小窗。";
 const reducedMotion = window.matchMedia("(prefers-reduced-motion: reduce)");
 const hosted = document.documentElement.dataset.offlineOnly === "true";
 const inWechat = /MicroMessenger/i.test(navigator.userAgent);
@@ -31,7 +36,9 @@ const scrollPositions = new Map();
 let libraryWorks = [];
 let exportWorks = new Map();
 let work = null;
-let tracks = [];
+let workTracks = null;
+let directoryTracks = [];
+const byName = new Intl.Collator(undefined, { numeric: true, sensitivity: "base" });
 let trackIndex = -1;
 let cueRows = [];
 let cueEvents = [];
@@ -42,8 +49,10 @@ let viewGeneration = 0;
 let trackGeneration = 0;
 let frame = 0;
 let subtitleStatus = "";
+let autoplayBlocked = false;
 let subtitleRequest = null;
 let subtitlePip = null;
+let safariPipVideoResult = "";
 let offlineReady = false;
 let playingOffline = false;
 let audioObjectUrl = "";
@@ -53,6 +62,9 @@ let receivingPackage = false;
 let transferReceiver = null;
 let packageTransfer = null;
 let offlineCoverUrls = [];
+let offlineRecords = null;
+let selectedOfflineWorks = null;
+let deletingOfflineWorks = false;
 const packageForm = element("package-form");
 
 function view(id) {
@@ -85,6 +97,7 @@ function filterWorks(page, list) {
   }
   element(`${page}-search-clear`).disabled = !input.value;
   element(`${page}-search-empty`).hidden = !query || !list.children.length || hasMatch;
+  if (page === "offline") updateOfflineManagement();
 }
 
 function setRoute(next, depth, push) {
@@ -98,32 +111,38 @@ function setRoute(next, depth, push) {
 function navigate(next) {
   if (goingBack) return;
   saveScroll();
-  void renderRoute(setRoute(next, route.depth + 1, true));
+  void renderRoute(setRoute(next, route.depth + 1, true), true);
 }
 
-async function renderRoute(entry) {
-  const { page, item, workId, trackId } = entry;
-  if (page === "library") await showWorks(activeView === undefined);
+async function renderRoute(entry, reuseListing = false) {
+  const { page, item, workId } = entry;
+  if (reuseListing && workTracks && activeView === page && work
+      && ((page === "work" && work.id === item.id) || (page === "offline" && work.id === workId))) {
+    renderDirectory(entry);
+  } else if (page === "library") await showWorks(activeView === undefined);
   else if (page === "work" || page === "lan-player") {
-    await showWork(item);
+    await showWork(entry);
     if (route !== entry || activeView !== "work") return;
-    if (page === "lan-player") playTrack(tracks.findIndex(track => track.id === trackId));
   } else if (page === "export") {
     if (!libraryWorks.length) await showWorks();
     if (route !== entry || activeView === "pairing") return;
     showExport();
   } else {
-    await showOffline(workId);
+    await showOffline(entry);
     if (route !== entry || activeView !== "offline") return;
-    if (page === "offline-player") await playOffline(tracks.findIndex(track => track.id === trackId));
+  }
+  if (page.endsWith("-player") && workTracks) {
+    const index = directoryTracks.findIndex(track => track.id === entry.trackId);
+    if (index < 0) return back();
+    await (hosted ? playOffline : playTrack)(index);
   }
   if (route === entry) window.scrollTo({ top: scrollPositions.get(entry.key) ?? 0, behavior: "instant" });
 }
 
-function back() {
-  if (!route.depth || goingBack) return;
+function back(steps = 1) {
+  if (route.depth < steps || goingBack) return;
   goingBack = true;
-  history.back();
+  history.go(-steps);
 }
 
 window.addEventListener("popstate", ({ state }) => {
@@ -131,24 +150,22 @@ window.addEventListener("popstate", ({ state }) => {
   if (state?.home !== home || !state.key) return;
   saveScroll();
   route = state;
-  void renderRoute(route);
+  void renderRoute(route, true);
 });
 
 function changeTrack(index) {
-  const track = tracks[index];
+  const track = directoryTracks[index];
   if (!track || !route.page.endsWith("-player")) return;
   route = { ...route, trackId: track.id };
   history.replaceState(route, "");
   (hosted ? playOffline : playTrack)(index);
 }
 
-function openTrack(track, fromOffline) {
+function openTrack(track) {
   if (goingBack) return;
   saveScroll();
-  setRoute(fromOffline
-    ? { page: "offline-player", workId: track.workId, trackId: track.id }
-    : { page: "lan-player", item: work, trackId: track.id }, route.depth + 1, true);
-  (fromOffline ? playOffline : playTrack)(tracks.indexOf(track));
+  setRoute({ ...route, page: hosted ? "offline-player" : "lan-player", trackId: track.id }, route.depth + 1, true);
+  (hosted ? playOffline : playTrack)(directoryTracks.indexOf(track));
 }
 
 async function request(path, options) {
@@ -194,7 +211,11 @@ function stopTrack() {
   resumeSubtitles.hidden = true;
   subtitlePipButton.disabled = true;
   subtitlePipStatus.textContent = "";
+  subtitlePipDiagnostics.open = false;
+  subtitlePipReport.textContent = "";
+  safariPipVideoResult = "";
   subtitleStatus = "";
+  autoplayBlocked = false;
   playbackStatus.textContent = "";
 }
 
@@ -231,7 +252,7 @@ async function showWorks(initial = false) {
       image.loading = "lazy";
       image.addEventListener("error", () => { image.src = "/mark.png"; }, { once: true });
       card.append(image, document.createTextNode(item.name));
-      card.addEventListener("click", () => navigate({ page: "work", item }));
+      card.addEventListener("click", () => navigate({ page: "work", item, directory: "" }));
       grid.append(card);
     }
     filterWorks("library", grid);
@@ -244,14 +265,132 @@ async function showWorks(initial = false) {
   }
 }
 
-async function showWork(item) {
+function renderBreadcrumb(nav, directory) {
+  const names = ["作品根", ...(directory ? directory.split("/") : [])];
+  const current = names.length - 1;
+  nav.replaceChildren();
+  nav.hidden = false;
+  nav.classList.toggle("deep-path", current >= 4);
+
+  function ancestor(level) {
+    const button = document.createElement("button");
+    button.type = "button";
+    button.textContent = button.title = names[level];
+    button.addEventListener("click", () => back(current - level));
+    return button;
+  }
+
+  if (current > 0) nav.append(ancestor(0));
+  if (current > 1) {
+    const overflow = document.createElement("details");
+    overflow.className = "breadcrumb-overflow";
+    const toggle = document.createElement("summary");
+    toggle.textContent = "…";
+    toggle.setAttribute("aria-label", "选择上级目录");
+    const menu = document.createElement("div");
+    for (let level = 1; level < current; ++level) {
+      const button = ancestor(level);
+      button.className = "breadcrumb-middle";
+      nav.append(button);
+      menu.append(ancestor(level));
+    }
+    overflow.append(toggle, menu);
+    nav.append(overflow);
+  }
+  const label = document.createElement("span");
+  label.textContent = label.title = names[current];
+  label.setAttribute("aria-current", "location");
+  nav.append(label);
+}
+
+async function removeOfflineTrack(record, button) {
+  if (!window.confirm(`从本机离线库删除「${record.trackName}」及其字幕？`)) return;
+  const generation = viewGeneration;
+  button.disabled = true;
+  try {
+    await offlineStore.remove(record);
+    if (route.page === "offline") {
+      saveScroll();
+      await renderRoute(route);
+    }
+  } catch {
+    if (generation === viewGeneration && activeView === "offline") connection.textContent = "无法删除已保存音轨，请重试。";
+    button.disabled = false;
+  }
+}
+
+function renderDirectory(entry) {
+  // A restored player entry can predate directory navigation, or the track may
+  // have gained directory metadata since this history entry was created.
+  const playing = entry.trackId && workTracks.find(track => track.id === entry.trackId);
+  const directory = playing ? trackDirectory(playing) : entry.directory || "";
+  const prefix = directory ? directory + "/" : "";
+  const folders = new Set();
+  directoryTracks = [];
+  for (const track of workTracks) {
+    const parent = trackDirectory(track);
+    if (parent === directory) directoryTracks.push(track);
+    else if (parent.startsWith(prefix)) folders.add(parent.slice(prefix.length).split("/", 1)[0]);
+  }
+  const trackName = track => hosted ? track.trackName : track.name;
+  directoryTracks.sort((a, b) => byName.compare(trackName(a), trackName(b)));
+  renderBreadcrumb(element(hosted ? "offline-breadcrumb" : "work-breadcrumb"), directory);
+  const rows = document.createDocumentFragment();
+  for (const name of [...folders].sort(byName.compare)) {
+    const row = document.createElement("li");
+    const button = document.createElement("button");
+    button.type = "button";
+    button.className = "directory-button";
+    button.textContent = name;
+    button.setAttribute("aria-label", `打开文件夹 ${name}`);
+    button.dataset.directory = prefix + name;
+    button.addEventListener("click", () => navigate({ ...entry, directory: prefix + name }));
+    row.append(button);
+    rows.append(row);
+  }
+  for (const track of directoryTracks) {
+    const row = document.createElement("li");
+    const play = document.createElement("button");
+    play.type = "button";
+    play.textContent = trackName(track);
+    play.dataset.trackId = track.id;
+    play.addEventListener("click", () => openTrack(track));
+    row.append(play);
+    if (hosted) {
+      const detail = document.createElement("small");
+      detail.textContent = fileSize(track.size);
+      play.append(detail);
+      const remove = document.createElement("button");
+      remove.type = "button";
+      remove.textContent = "删除";
+      remove.setAttribute("aria-label", `删除 ${track.trackName}`);
+      remove.addEventListener("click", () => removeOfflineTrack(track, remove));
+      row.append(remove);
+    }
+    rows.append(row);
+  }
+  element(hosted ? "offline-tracks" : "tracks").replaceChildren(rows);
+  connection.textContent = "";
+  if (!folders.size && !directoryTracks.length) {
+    connection.textContent = directory ? "此目录没有可播放的音轨。"
+      : hosted ? "该作品没有已保存的音轨。" : "此作品没有可播放的 MP3 或 WAV 音轨。";
+  }
+}
+
+function trackDirectory(track) {
+  return track.directory && track.directory !== "." ? track.directory : "";
+}
+
+async function showWork(entry) {
+  const { item } = entry;
   const generation = ++viewGeneration;
   stopTrack();
   work = item;
-  tracks = [];
+  workTracks = null;
+  directoryTracks = [];
   element("work-name").textContent = item.name;
-  const list = element("tracks");
-  list.replaceChildren();
+  element("work-breadcrumb").hidden = true;
+  element("tracks").replaceChildren();
   packageForm.hidden = true;
   element("package-open").hidden = true;
   element("package-help").hidden = true;
@@ -262,23 +401,10 @@ async function showWork(item) {
     const result = await request(`/api/works/${item.id}/tracks`);
     if (generation !== viewGeneration) return;
     work = { id: item.id, name: result.name };
-    tracks = result.tracks;
-    element("package-open").hidden = !tracks.some(isExportableTrack);
+    workTracks = result.tracks;
+    element("package-open").hidden = !workTracks.some(isExportableTrack);
     element("work-name").textContent = result.name;
-    for (const track of tracks) {
-      const row = document.createElement("li");
-      const button = document.createElement("button");
-      button.textContent = track.name;
-      if (track.directory && track.directory !== ".") {
-        const directory = document.createElement("small");
-        directory.textContent = track.directory;
-        button.append(directory);
-      }
-      button.addEventListener("click", () => openTrack(track, false));
-      row.append(button);
-      list.append(row);
-    }
-    connection.textContent = tracks.length ? "" : "此作品没有可播放的 MP3 或 WAV 音轨。";
+    renderDirectory(entry);
   } catch (error) {
     if (generation !== viewGeneration) return;
     if (error.status === 401) showPairing(error);
@@ -303,7 +429,7 @@ function openPackageSelection() {
   if (!work) return;
   const list = element("package-tracks");
   list.replaceChildren();
-  for (const track of tracks) {
+  for (const track of workTracks) {
     if (!isExportableTrack(track)) continue;
     const label = document.createElement("label");
     const input = document.createElement("input");
@@ -512,16 +638,53 @@ function cueTimestamp(ms) {
     : `${Math.floor(minutes / 60)}:${String(minutes % 60).padStart(2, "0")}:${tail}`;
 }
 
-function supportsSubtitlePip() {
-  return document.pictureInPictureEnabled === true
-    && typeof HTMLVideoElement.prototype.requestPictureInPicture === "function"
-    && typeof HTMLCanvasElement.prototype.captureStream === "function";
+function safariPipInterfaceStatus(videoApi) {
+  const canCheck = typeof videoApi?.webkitSupportsPresentationMode === "function";
+  const canSet = typeof videoApi?.webkitSetPresentationMode === "function";
+  if (canCheck && canSet) return `已提供（${safariPipVideoResult || "当前字幕视频未检测"}）`;
+  if (canCheck) return "缺少切换接口";
+  if (canSet) return "缺少检测接口";
+  return "未提供";
+}
+
+function checkSafariPipVideo(video) {
+  if (typeof video.webkitSupportsPresentationMode !== "function"
+      || typeof video.webkitSetPresentationMode !== "function" || video.readyState < 1) return "";
+  try {
+    return video.webkitSupportsPresentationMode("picture-in-picture")
+      ? "当前字幕视频支持" : "当前字幕视频不支持";
+  } catch {
+    return "当前字幕视频检测失败";
+  }
 }
 
 function updateSubtitlePipButton() {
+  const enabled = document.pictureInPictureEnabled;
+  const videoApi = window.HTMLVideoElement?.prototype;
+  const canRequest = typeof videoApi?.requestPictureInPicture === "function";
+  const canCapture = typeof window.HTMLCanvasElement?.prototype.captureStream === "function";
+  const supported = enabled === true && canRequest && canCapture;
   const active = !!subtitlePip && document.pictureInPictureElement === subtitlePip.video;
   subtitlePipButton.setAttribute("aria-pressed", String(active));
-  subtitlePipButton.disabled = !cueRows.length || !!audio.error || !supportsSubtitlePip() || !!subtitlePip?.opening;
+  subtitlePipButton.disabled = !cueRows.length || !!audio.error || !supported || !!subtitlePip?.opening;
+  if (!cueRows.length) return;
+
+  const entry = isStandalone()
+    ? (hosted ? "主屏幕离线库" : "局域网播放（主屏幕）")
+    : (hosted ? "离线库（浏览器标签页）" : "局域网播放（浏览器标签页）");
+  const switchState = enabled === true ? "已启用" : enabled === false ? "未启用" : "未提供";
+  subtitlePipReport.textContent = [
+    `打开方式：${entry}`,
+    `网页画中画开关：${switchState}`,
+    `标准画中画接口：${canRequest ? "已提供" : "未提供"}`,
+    `画布视频流接口：${canCapture ? "已提供" : "未提供"}`,
+    `Safari 专用接口：${safariPipInterfaceStatus(videoApi)}`,
+  ].join("\n");
+  if (!supported) {
+    subtitlePipStatus.textContent = pipRequirementsMessage;
+  } else if (subtitlePipStatus.textContent === pipRequirementsMessage) {
+    subtitlePipStatus.textContent = "";
+  }
 }
 
 function closeSubtitlePip() {
@@ -586,16 +749,19 @@ async function toggleSubtitlePip() {
   }
 
   let session = subtitlePip;
+  const retrying = session !== null;
+  let requestingWindow = false;
   let timeout;
   subtitlePipButton.disabled = true;
   subtitlePipStatus.textContent = "正在打开字幕画中画…";
   try {
     if (!session) {
+      safariPipVideoResult = "";
       const canvas = document.createElement("canvas");
       canvas.width = 640;
       canvas.height = 360;
       const context = canvas.getContext("2d", { alpha: false });
-      if (!context) throw new Error("CanvasUnavailable");
+      if (!context) throw new DOMException("无法创建字幕画布", "NotSupportedError");
       const video = document.createElement("video");
       video.muted = true;
       video.playsInline = true;
@@ -607,15 +773,18 @@ async function toggleSubtitlePip() {
       video.srcObject = stream;
       renderSubtitlePip();
       await Promise.race([video.play(), new Promise((_, reject) => {
-        timeout = setTimeout(() => reject(new Error("TimeoutError")), 5000);
+        timeout = setTimeout(() => reject(new DOMException("字幕画面启动超时", "TimeoutError")), 5000);
       })]);
+      if (subtitlePip !== session) return;
+      safariPipVideoResult = checkSafariPipVideo(session.video);
+      if (navigator.userActivation?.isActive === false) {
+        subtitlePipStatus.textContent = pipRetryMessage;
+        return;
+      }
     }
-    if (subtitlePip !== session) return;
-    if (navigator.userActivation?.isActive === false) {
-      subtitlePipStatus.textContent = "字幕画面已准备，请再次点击「字幕画中画」。";
-      return;
-    }
+    // On a retry, request PiP directly in the click handler with the prepared video.
     session.opening = true;
+    requestingWindow = true;
     await session.video.requestPictureInPicture();
     if (subtitlePip !== session) {
       if (document.pictureInPictureElement === session.video) await document.exitPictureInPicture();
@@ -624,9 +793,14 @@ async function toggleSubtitlePip() {
     subtitlePipStatus.textContent = "字幕画中画已开启，可以切换到其他应用。";
   } catch (error) {
     if (subtitlePip !== session) return;
+    if (requestingWindow && !retrying && error.name === "NotAllowedError") {
+      subtitlePipStatus.textContent = pipRetryMessage;
+      return;
+    }
     closeSubtitlePip();
-    const code = error.message === "TimeoutError" ? "TimeoutError" : error.name;
-    subtitlePipStatus.textContent = `无法打开字幕画中画（${code}）。`;
+    subtitlePipStatus.textContent = requestingWindow
+      ? `无法打开字幕画中画（${error.name}）。`
+      : `字幕画面启动失败（${error.name}）。`;
   } finally {
     clearTimeout(timeout);
     if (session && subtitlePip === session) session.opening = false;
@@ -660,9 +834,6 @@ function installSubtitles(entries) {
   subtitleCues.replaceChildren(rows);
   subtitles.hidden = !cueRows.length;
   updateSubtitlePipButton();
-  if (cueRows.length && !supportsSubtitlePip()) {
-    subtitlePipStatus.textContent = "当前打开方式不支持字幕画中画。";
-  }
   renderSubtitles();
 }
 
@@ -739,37 +910,49 @@ function tick() {
   frame = audio.paused || audio.ended ? 0 : requestAnimationFrame(tick);
 }
 
+function startAudio(generation) {
+  audio.play().catch(error => {
+    if (generation !== trackGeneration || error.name !== "NotAllowedError") return;
+    autoplayBlocked = true;
+    playbackStatus.textContent = "请点击播放器的播放按钮。";
+  });
+}
+
+function setSubtitleStatus(message) {
+  subtitleStatus = message;
+  if (!audio.error && !autoplayBlocked) playbackStatus.textContent = message;
+}
+
+function setTrackIndex(index) {
+  trackIndex = index;
+  element("previous").disabled = index === 0;
+  element("next").disabled = index === directoryTracks.length - 1;
+}
+
 function playTrack(index) {
-  if (!work || index < 0 || index >= tracks.length) return;
+  if (!work || index < 0 || index >= directoryTracks.length) return;
   stopTrack();
   const generation = trackGeneration;
-  const track = tracks[index];
-  trackIndex = index;
+  const track = directoryTracks[index];
+  setTrackIndex(index);
   connection.textContent = "";
   element("playing-work").textContent = work.name;
   element("playing-track").textContent = track.name;
   element("cover").src = `/api/works/${work.id}/cover`;
-  element("previous").disabled = index === 0;
-  element("next").disabled = index === tracks.length - 1;
   view("player");
 
   const path = `/api/works/${work.id}/tracks/${track.id}`;
   audio.src = path + "/audio";
-  audio.play().catch(error => {
-    if (generation === trackGeneration && error.name === "NotAllowedError") {
-      playbackStatus.textContent = "请点击播放器的播放按钮。";
-    }
-  });
+  startAudio(generation);
   subtitleRequest = new AbortController();
   request(path + "/subtitles", { signal: subtitleRequest.signal }).then(result => {
     if (generation !== trackGeneration) return;
     installSubtitles(result.entries);
-    subtitleStatus = subtitleMessage(result.state);
-    if (!audio.error) playbackStatus.textContent = subtitleStatus;
+    setSubtitleStatus(subtitleMessage(result.state));
   }).catch(error => {
     if (generation !== trackGeneration || error.name === "AbortError") return;
     if (error.status === 401) showPairing(error);
-    else if (!audio.error) playbackStatus.textContent = "暂时无法读取字幕。";
+    else setSubtitleStatus("暂时无法读取字幕。");
   });
 }
 
@@ -788,8 +971,138 @@ function fileSize(bytes) {
 
 function updateImportControls() {
   const busy = !!importing || receivingPackage;
-  element("import-packs").hidden = !offlineReady || busy;
+  element("import-packs").hidden = !offlineReady || busy || selectedOfflineWorks !== null;
   element("cancel-import").hidden = !busy;
+}
+
+function updateOfflineManagement() {
+  const atHome = offlineReady && route?.page === "offline" && !route.workId;
+  const managing = selectedOfflineWorks !== null;
+  const manage = element("offline-manage");
+  manage.hidden = !atHome || !offlineRecords;
+  manage.disabled = deletingOfflineWorks || (!managing && !offlineRecords?.length);
+  manage.textContent = managing ? "完成" : "管理";
+  manage.setAttribute("aria-expanded", String(managing));
+  element("offline-management-bar").hidden = !atHome || !managing;
+  const cards = element("offline-works").children;
+  let visibleCount = 0;
+  let checkedCount = 0;
+  for (const card of cards) {
+    const checked = selectedOfflineWorks?.has(card.dataset.workId) === true;
+    if (managing) card.setAttribute("aria-pressed", String(checked));
+    else card.removeAttribute("aria-pressed");
+    card.disabled = managing && deletingOfflineWorks;
+    if (!card.hidden) {
+      ++visibleCount;
+      if (checked) ++checkedCount;
+    }
+  }
+  const all = element("offline-select-all");
+  all.disabled = deletingOfflineWorks || !visibleCount;
+  const allChecked = visibleCount > 0 && checkedCount === visibleCount;
+  all.setAttribute("aria-pressed", String(allChecked));
+  all.textContent = (allChecked ? "取消全选" : "全选") + (element("offline-search").value.trim() ? "搜索结果" : "");
+  const remove = element("offline-delete-selected");
+  remove.disabled = deletingOfflineWorks || !offlineRecords || !selectedOfflineWorks?.size;
+  remove.textContent = deletingOfflineWorks ? "正在删除…" : `删除所选（${selectedOfflineWorks?.size ?? 0} 部）`;
+  updateImportControls();
+}
+
+function setManagementStatus(message) {
+  const status = element("offline-management-status");
+  status.textContent = message;
+  status.hidden = !message;
+}
+
+function renderOfflineHome(entries) {
+  offlineRecords = entries.map(({ id, workId, file }) => ({ id, workId, file }));
+  const works = new Map();
+  for (const record of entries) {
+    if (!works.has(record.workId)) works.set(record.workId, []);
+    works.get(record.workId).push(record);
+  }
+  for (const id of selectedOfflineWorks ?? []) {
+    if (!works.has(id)) selectedOfflineWorks.delete(id);
+  }
+  for (const url of offlineCoverUrls) URL.revokeObjectURL(url);
+  offlineCoverUrls = [];
+  const cards = document.createDocumentFragment();
+  for (const [id, records] of works) {
+    const card = document.createElement("button");
+    card.className = "work-card";
+    card.type = "button";
+    card.dataset.workId = id;
+    const folderName = records.find(record => record.workFolderName)?.workFolderName;
+    setWorkSearchFields(card, records[0].workName, folderName);
+    const image = document.createElement("img");
+    const url = records[0].cover ? URL.createObjectURL(records[0].cover) : "mark.png";
+    if (records[0].cover) offlineCoverUrls.push(url);
+    image.src = url;
+    image.alt = "";
+    card.append(image, `${records[0].workName} · ${records.length} 条`);
+    card.addEventListener("click", () => {
+      if (!selectedOfflineWorks) return navigate({ page: "offline", workId: id, directory: "" });
+      if (selectedOfflineWorks.has(id)) selectedOfflineWorks.delete(id);
+      else selectedOfflineWorks.add(id);
+      updateOfflineManagement();
+    });
+    cards.append(card);
+  }
+  const grid = element("offline-works");
+  grid.replaceChildren(cards);
+  filterWorks("offline", grid);
+}
+
+function updateOfflineUsage(entries) {
+  const used = entries.reduce((sum, record) => sum + record.size + (record.cover?.size ?? 0), 0);
+  element("offline-usage").textContent = entries.length
+    ? `已保存 ${entries.length} 条音轨 · ${fileSize(used)}` : "暂无已保存音轨。";
+}
+
+async function deleteSelectedOfflineWorks() {
+  const selected = selectedOfflineWorks;
+  if (deletingOfflineWorks || !offlineRecords || !selected?.size) return;
+  const workCount = selected.size;
+  const records = offlineRecords.filter(record => selected.has(record.workId));
+  if (!window.confirm(`从本机离线库删除选中的 ${workCount} 部作品，共 ${records.length} 条音轨？\n包含各子目录中的已保存音频和字幕。电脑原文件和已下载的 ZIP 会保留。`)) return;
+  deletingOfflineWorks = true;
+  updateOfflineManagement();
+  setManagementStatus("");
+  try {
+    const entries = await offlineStore.removeWorks(records);
+    if (route.page === "offline" && !route.workId) {
+      renderOfflineHome(entries);
+      if (selectedOfflineWorks === selected) {
+        if (selected.size) {
+          const remaining = entries.filter(record => selected.has(record.workId)).length;
+          setManagementStatus(`还有 ${selected.size} 部作品、${remaining} 条音轨保存在本机，已保留勾选，可重试。`);
+        } else {
+          selectedOfflineWorks = null;
+          setManagementStatus(`已删除 ${workCount} 部作品。`);
+        }
+      }
+      updateOfflineUsage(entries);
+    } else if (selected.has(route.workId)) {
+      // History navigation may have reopened this work while deletion held the storage lock.
+      const remaining = entries.filter(record => record.workId === route.workId);
+      if (!remaining.length) back(route.depth);
+      else if (activeView === "player") {
+        workTracks = remaining;
+        renderDirectory(route);
+        const index = directoryTracks.findIndex(track => track.id === route.trackId);
+        if (index < 0) back();
+        else setTrackIndex(index);
+      } else {
+        saveScroll();
+        await renderRoute(route);
+      }
+    }
+  } catch {
+    if (selectedOfflineWorks === selected) setManagementStatus("未能确认删除结果，已保留勾选，请重试。");
+  } finally {
+    deletingOfflineWorks = false;
+    updateOfflineManagement();
+  }
 }
 
 function showInstallGuide() {
@@ -809,17 +1122,25 @@ function hideInstallGuide() {
   installHelp.hidden = true;
 }
 
-async function showOffline(workId = null) {
+async function showOffline(entry) {
+  const { workId } = entry;
   const generation = ++viewGeneration;
   stopTrack();
-  tracks = [];
+  work = null;
+  workTracks = null;
+  directoryTracks = [];
   connection.textContent = "";
   view("offline");
   element("offline-heading").textContent = "离线库";
   element("offline-search-box").hidden = !!workId || !offlineReady;
-  const list = element("offline-tracks");
-  list.replaceChildren();
+  element("offline-breadcrumb").hidden = true;
+  element("offline-tracks").replaceChildren();
   const grid = element("offline-works");
+  offlineRecords = null;
+  if (workId) {
+    selectedOfflineWorks = null;
+    setManagementStatus("");
+  }
   grid.replaceChildren();
   filterWorks("offline", grid);
   for (const url of offlineCoverUrls) URL.revokeObjectURL(url);
@@ -829,62 +1150,19 @@ async function showOffline(workId = null) {
   try {
     const entries = await offlineStore.list();
     if (generation !== viewGeneration) return;
-    work = null;
-    const works = new Map();
-    for (const record of entries) {
-      if (!works.has(record.workId)) works.set(record.workId, []);
-      works.get(record.workId).push(record);
-    }
     if (workId) {
-      tracks = (works.get(workId) ?? []).sort((a, b) => a.order - b.order || a.id.localeCompare(b.id));
-      if (tracks.length) element("offline-heading").textContent = tracks[0].workName;
-      else connection.textContent = "该作品没有已保存的音轨。";
-    } else {
-      for (const [id, records] of works) {
-        const card = document.createElement("button");
-        card.className = "work-card";
-        const folderName = records.find(record => record.workFolderName)?.workFolderName;
-        setWorkSearchFields(card, records[0].workName, folderName);
-        const image = document.createElement("img");
-        const url = records[0].cover ? URL.createObjectURL(records[0].cover) : "mark.png";
-        if (records[0].cover) offlineCoverUrls.push(url);
-        image.src = url;
-        image.alt = "";
-        card.append(image, `${records[0].workName} · ${records.length} 条`);
-        card.addEventListener("click", () => navigate({ page: "offline", workId: id }));
-        grid.append(card);
+      workTracks = entries.filter(record => record.workId === workId);
+      if (!workTracks.length) {
+        back(entry.depth);
+        return;
       }
-      filterWorks("offline", grid);
+      work = { id: workId, name: workTracks[0].workName };
+      element("offline-heading").textContent = work.name;
+      renderDirectory(entry);
+    } else {
+      renderOfflineHome(entries);
     }
-    const used = entries.reduce((sum, record) => sum + record.size + (record.cover?.size ?? 0), 0);
-    element("offline-usage").textContent = entries.length
-      ? `已保存 ${entries.length} 条音轨 · ${fileSize(used)}` : "暂无已保存音轨。";
-    for (const record of tracks) {
-      const row = document.createElement("li");
-      const play = document.createElement("button");
-      const detail = document.createElement("small");
-      detail.textContent = `${record.workName} · ${fileSize(record.size)}`;
-      play.append(record.trackName, detail);
-      play.addEventListener("click", () => openTrack(record, true));
-      const remove = document.createElement("button");
-      remove.textContent = "删除";
-      remove.setAttribute("aria-label", `删除 ${record.trackName}`);
-      remove.addEventListener("click", async () => {
-        remove.disabled = true;
-        try {
-          await offlineStore.remove(record);
-          if (generation === viewGeneration) {
-            saveScroll();
-            await renderRoute(route);
-          }
-        } catch {
-          if (generation === viewGeneration) connection.textContent = "无法删除已保存音轨，请重试。";
-          remove.disabled = false;
-        }
-      });
-      row.append(play, remove);
-      list.append(row);
-    }
+    updateOfflineUsage(entries);
   } catch {
     if (generation === viewGeneration) connection.textContent = "无法读取离线库。";
   }
@@ -939,19 +1217,17 @@ async function importPackages(files, transferSignal) {
 }
 
 async function playOffline(index) {
-  const record = tracks[index];
+  const record = directoryTracks[index];
   if (!record) return;
   stopTrack();
   const generation = trackGeneration;
   playingOffline = true;
-  trackIndex = index;
+  setTrackIndex(index);
   connection.textContent = "";
   element("playing-work").textContent = record.workName;
   element("playing-track").textContent = record.trackName;
   if (record.cover) coverObjectUrl = URL.createObjectURL(record.cover);
   element("cover").src = coverObjectUrl || "mark.png";
-  element("previous").disabled = index === 0;
-  element("next").disabled = index === tracks.length - 1;
   view("player");
   try {
     const file = await offlineStore.getFile(record);
@@ -960,13 +1236,8 @@ async function playOffline(index) {
     audioObjectUrl = URL.createObjectURL(file.slice(0, file.size, record.mime));
     audio.src = audioObjectUrl;
     installSubtitles(record.subtitles.entries);
-    subtitleStatus = subtitleMessage(record.subtitles.state);
-    playbackStatus.textContent = subtitleStatus;
-    audio.play().catch(error => {
-      if (generation === trackGeneration && error.name === "NotAllowedError") {
-        playbackStatus.textContent = "请点击播放器的播放按钮。";
-      }
-    });
+    setSubtitleStatus(subtitleMessage(record.subtitles.state));
+    startAudio(generation);
   } catch {
     if (generation === trackGeneration) playbackStatus.textContent = "本地音频已缺失，请重新导入离线包。";
   }
@@ -1012,7 +1283,22 @@ for (const [page, listId] of [["library", "works"], ["export", "export-works"], 
     filterWorks(page, list);
   });
 }
-element("tracks-button").addEventListener("click", back);
+element("tracks-button").addEventListener("click", () => back());
+element("offline-manage").addEventListener("click", () => {
+  selectedOfflineWorks = selectedOfflineWorks ? null : new Set();
+  setManagementStatus("");
+  updateOfflineManagement();
+});
+element("offline-select-all").addEventListener("click", event => {
+  const deselect = event.currentTarget.getAttribute("aria-pressed") === "true";
+  for (const card of element("offline-works").children) {
+    if (card.hidden) continue;
+    if (deselect) selectedOfflineWorks.delete(card.dataset.workId);
+    else selectedOfflineWorks.add(card.dataset.workId);
+  }
+  updateOfflineManagement();
+});
+element("offline-delete-selected").addEventListener("click", deleteSelectedOfflineWorks);
 element("batch-open").addEventListener("click", () => navigate({ page: "export" }));
 element("package-open").addEventListener("click", openPackageSelection);
 element("package-close").addEventListener("click", () => { packageForm.hidden = true; });
@@ -1062,7 +1348,13 @@ element("pack-files").addEventListener("change", event => {
 });
 element("previous").addEventListener("click", () => changeTrack(trackIndex - 1));
 element("next").addEventListener("click", () => changeTrack(trackIndex + 1));
+playbackMode.addEventListener("click", () => {
+  audio.loop = !audio.loop;
+  playbackMode.textContent = audio.loop ? "单曲循环" : "顺序播放";
+  playbackMode.setAttribute("aria-label", audio.loop ? "单曲循环，切换为顺序播放" : "顺序播放，切换为单曲循环");
+});
 subtitlePipButton.addEventListener("click", toggleSubtitlePip);
+standaloneMode.addEventListener?.("change", updateSubtitlePipButton);
 document.addEventListener("visibilitychange", () => {
   if (subtitlePip) syncSubtitles();
 });
@@ -1108,16 +1400,21 @@ element("cover").addEventListener("error", event => {
   if (!event.target.src.endsWith("/mark.png")) event.target.src = "mark.png";
 });
 audio.addEventListener("playing", () => {
+  autoplayBlocked = false;
   playbackStatus.textContent = subtitleStatus;
   if (!frame) tick();
   else syncSubtitles();
 });
 audio.addEventListener("waiting", () => {
-  if (audio.getAttribute("src")) playbackStatus.textContent = "正在缓冲…";
+  if (audio.getAttribute("src") && !autoplayBlocked) playbackStatus.textContent = "正在缓冲…";
 });
-for (const event of ["timeupdate", "seeking", "seeked", "pause", "ended"]) {
+for (const event of ["timeupdate", "seeking", "seeked", "pause"]) {
   audio.addEventListener(event, syncSubtitles);
 }
+audio.addEventListener("ended", () => {
+  syncSubtitles();
+  if (audio.ended && !audio.loop && activeView === "player" && !goingBack) changeTrack(trackIndex + 1);
+});
 audio.addEventListener("error", async () => {
   if (!audio.getAttribute("src")) return;
   closeSubtitlePip();

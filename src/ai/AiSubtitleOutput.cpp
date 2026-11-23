@@ -1,4 +1,5 @@
 #include "ai/AiSubtitleOutput.h"
+#include "ai/FasterWhisperRecoveryDiagnostics.h"
 #include "playback/AudioFileValidation.h"
 #include "subtitle/SubtitleFileLoader.h"
 #include "subtitle/GeneratedSubtitleInfo.h"
@@ -11,6 +12,7 @@
 #include <QRegularExpression>
 #include <QScopeGuard>
 #include <QUuid>
+#include <algorithm>
 #ifdef Q_OS_WIN
 #ifndef NOMINMAX
 #define NOMINMAX
@@ -118,19 +120,35 @@ AiSubtitleTaskResult validateAndPublishAiSubtitle(const AiSubtitleOutputRequest 
     const QFileInfo output(expectedSrt);
     if (!output.isFile() || output.size() <= 0 || !safeAncestors(expectedSrt))
         return fail(result, QStringLiteral("The engine did not produce the expected ordinary nonempty SRT file."), cancelled);
-    const auto loaded = SubtitleFileLoader::load(expectedSrt, SubtitleFormat::Srt);
+    QByteArray sourceBytes;
+    const auto loaded = SubtitleFileLoader::load(expectedSrt, SubtitleFormat::Srt, &sourceBytes);
     if (cancelled.load())
         return fail(result, {}, cancelled);
+    const bool recoveringAsr = request.validation == AiSubtitleValidation::RecoveredJapaneseAsr;
+    if (recoveringAsr)
+        result.warnings.append(fasterWhisperRecoverySrtWarnings(loaded));
     if (!loaded.succeeded())
         return fail(result, QStringLiteral("Generated SRT failed validation: %1").arg(loaded.errorMessage), cancelled);
-    for (const auto &diagnostic : loaded.diagnostics) {
-        if (diagnostic.severity == SubtitleLoadDiagnosticSeverity::Error)
-            return fail(result, QStringLiteral("Generated SRT contains parser errors at line %1: %2")
-                .arg(diagnostic.line).arg(diagnostic.message), cancelled);
-        result.warnings.append(QStringLiteral("SRT line %1: %2").arg(diagnostic.line).arg(diagnostic.message));
-    }
-    for (const auto &entry : loaded.entries) {
-        if (entry.startMs < 0 || entry.endMs <= entry.startMs || entry.text.trimmed().isEmpty())
+    const qsizetype displayableCount = std::count_if(loaded.entries.cbegin(), loaded.entries.cend(),
+        [](const SubtitleEntry &entry) {
+            return entry.startMs >= 0 && entry.endMs > entry.startMs && !entry.text.trimmed().isEmpty();
+        });
+    if (recoveringAsr) {
+        if (displayableCount == 0)
+            return fail(result, QStringLiteral("本次 SRT 没有可以正常显示的字幕条目。"), cancelled);
+        const QString jsonPath = output.dir().filePath(output.completeBaseName() + QStringLiteral(".json"));
+        if (safeAncestors(jsonPath))
+            result.warnings.append(fasterWhisperRecoveryJsonWarnings(jsonPath, loaded.entries));
+        else
+            result.warnings.append(QStringLiteral("JSON 结果路径含链接，未读取该文件。"));
+    } else {
+        for (const auto &diagnostic : loaded.diagnostics) {
+            if (diagnostic.severity == SubtitleLoadDiagnosticSeverity::Error)
+                return fail(result, QStringLiteral("Generated SRT contains parser errors at line %1: %2")
+                    .arg(diagnostic.line).arg(diagnostic.message), cancelled);
+            result.warnings.append(QStringLiteral("SRT line %1: %2").arg(diagnostic.line).arg(diagnostic.message));
+        }
+        if (displayableCount != loaded.entries.size())
             return fail(result, QStringLiteral("Generated SRT contains an invalid subtitle interval or empty text."), cancelled);
     }
     // Recheck the audio identity before publishing next to it. A library work
@@ -187,27 +205,23 @@ AiSubtitleTaskResult validateAndPublishAiSubtitle(const AiSubtitleOutputRequest 
     });
     if (!safeAncestors(publishedDirectory))
         return fail(result, QStringLiteral("Result directory became linked; no subtitle was published."), cancelled);
-    QFile source(expectedSrt);
     QFile destination(temporarySrt);
-    if (!safeAncestors(expectedSrt) || !source.open(QIODevice::ReadOnly)
+    if (!safeAncestors(expectedSrt) || !QFileInfo(expectedSrt).isFile()
         || !destination.open(QIODevice::WriteOnly | QIODevice::NewOnly))
         return fail(result, QStringLiteral("Could not stage the result beside the audio; validated SRT remains in %1.").arg(result.taskDirectory), cancelled);
     ownTemporarySrt = true;
-    qint64 copied = 0;
-    while (!source.atEnd()) {
+    qsizetype copied = 0;
+    while (copied < sourceBytes.size()) {
         if (cancelled.load())
             return fail(result, {}, cancelled);
-        const QByteArray block = source.read(64 * 1024);
-        copied += block.size();
-        if (source.error() != QFileDevice::NoError || block.isEmpty()
-            || copied > SubtitleFileLoader::MaxFileSizeBytes
-            || destination.write(block) != block.size())
+        const qsizetype count = std::min<qsizetype>(64 * 1024, sourceBytes.size() - copied);
+        if (destination.write(sourceBytes.constData() + copied, count) != count)
             return fail(result, QStringLiteral("Could not copy the validated result beside the audio; internal result was retained."), cancelled);
+        copied += count;
     }
-    if (!destination.flush() || copied != output.size())
+    if (!destination.flush())
         return fail(result, QStringLiteral("Could not finish saving the subtitle beside the audio; internal result was retained."), cancelled);
     destination.close();
-    source.close();
     const GeneratedSubtitleInfo info{request.mode, completedAt,
         QFileInfo(request.audioPath).fileName(), subtitleName, request.language};
     const bool recordExisted = QFileInfo::exists(recordPath) || QFileInfo(recordPath).isSymLink();
@@ -235,7 +249,7 @@ AiSubtitleTaskResult validateAndPublishAiSubtitle(const AiSubtitleOutputRequest 
     result.language = request.language;
     result.state = State::Succeeded;
     result.srtPath = finalSrt;
-    result.subtitleCount = loaded.entries.size();
+    result.subtitleCount = displayableCount;
     return result;
 }
 } // namespace asmr

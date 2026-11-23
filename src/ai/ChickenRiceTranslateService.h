@@ -1,6 +1,7 @@
 #pragma once
 #include "ai/ChickenRiceGenerationOptions.h"
 #include "ai/AiSubtitleTaskTypes.h"
+#include "ai/GpuCompatibility.h"
 #include <QObject>
 #include <QStringList>
 #include <atomic>
@@ -30,6 +31,7 @@ struct ChickenRiceTranslateRequest {
     ChickenRiceGenerationOptions generationOptions;
     QString outputBatchId;
     QString outputFileSuffix;
+    ChickenRicePurpose purpose = ChickenRicePurpose::Translate;
 };
 class ChickenRiceTranslateService final : public QObject {
     Q_OBJECT

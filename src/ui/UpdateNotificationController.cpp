@@ -33,6 +33,7 @@
 namespace asmr {
 namespace {
 const QString Prefix = QStringLiteral("updates/");
+const QString PagesRetryAfterKey = QStringLiteral("pagesRetryAfterUtc");
 constexpr qint64 AutomaticIntervalSeconds = 24 * 60 * 60;
 constexpr qsizetype MaximumSavedReleaseBytes = 64 * 1024;
 
@@ -439,7 +440,7 @@ bool UpdateNotificationController::isIgnored(const QString &version) const
 
 bool UpdateNotificationController::isRateLimited() const
 {
-    const auto until = savedDate(QStringLiteral("retryAfterUtc"));
+    const auto until = savedDate(PagesRetryAfterKey);
     return until.isValid() && until > nowUtc();
 }
 
@@ -465,7 +466,7 @@ void UpdateNotificationController::checkManually()
     }
     if (isRateLimited()) {
         showStatus(QStringLiteral("检查更新暂时受到限流，请在 %1 后重试。")
-            .arg(savedDate(QStringLiteral("retryAfterUtc")).toLocalTime().toString(QStringLiteral("yyyy-MM-dd HH:mm:ss"))));
+            .arg(savedDate(PagesRetryAfterKey).toLocalTime().toString(QStringLiteral("yyyy-MM-dd HH:mm:ss"))));
         return;
     }
     if (m_service && m_service->isBusy()) {
@@ -569,8 +570,8 @@ void UpdateNotificationController::finished(UpdateCheckResult result)
     const bool manual = std::exchange(m_manual, false);
     if (m_settings) {
         if (result.retryAfterUtc.isValid() && result.retryAfterUtc > nowUtc())
-            m_settings->setValue(Prefix + QStringLiteral("retryAfterUtc"), result.retryAfterUtc.toUTC().toString(Qt::ISODateWithMs));
-        else m_settings->remove(Prefix + QStringLiteral("retryAfterUtc"));
+            m_settings->setValue(Prefix + PagesRetryAfterKey, result.retryAfterUtc.toUTC().toString(Qt::ISODateWithMs));
+        else m_settings->remove(Prefix + PagesRetryAfterKey);
     }
     // Explicit cancellation can race with an already queued completion.
     if (std::exchange(m_discardResult, false)

@@ -31,9 +31,6 @@
 
 namespace asmr {
 namespace {
-const QString SettingsPrefix = QStringLiteral("Ai/GpuRecommendation/");
-const QString InstallRootKey = QStringLiteral("Ai/ChickenRice/installRoot");
-
 QString normalizedInstallRoot(const QString &path)
 {
     const QString value = QDir::fromNativeSeparators(path.trimmed());
@@ -42,12 +39,6 @@ QString normalizedInstallRoot(const QString &path)
         return {};
     const QString clean = QDir::cleanPath(value);
     return QDir(clean).isRoot() ? QString() : clean;
-}
-
-QString defaultInstallRoot()
-{
-    return QDir(QStandardPaths::writableLocation(QStandardPaths::AppLocalDataLocation))
-        .filePath(QStringLiteral("Ai/ChickenRice"));
 }
 
 QString byteDescription(qint64 bytes)
@@ -80,9 +71,14 @@ QString memoryDescription(quint64 bytes)
 } // namespace
 
 GpuRecommendationDialog::GpuRecommendationDialog(
-    QSettings *settings, QWidget *parent, Probe probe, ChickenRiceInstallService *installer, bool embedded)
-    : QDialog(parent), m_settings(settings), m_probe(std::move(probe)), m_installer(installer),
-      m_embedded(embedded)
+    QSettings *settings, QWidget *parent, Probe probe, ChickenRiceInstallService *installer, bool embedded,
+    ChickenRicePurpose purpose)
+    : QDialog(parent), m_settings(settings), m_purpose(purpose),
+      m_componentGroup(purpose == ChickenRicePurpose::Transcribe
+          ? QStringLiteral("Ai/ChickenRiceAsr") : QStringLiteral("Ai/ChickenRice")),
+      m_recommendationGroup(purpose == ChickenRicePurpose::Transcribe
+          ? m_componentGroup + QStringLiteral("/GpuRecommendation") : QStringLiteral("Ai/GpuRecommendation")),
+      m_probe(std::move(probe)), m_installer(installer), m_embedded(embedded)
 {
     if (!m_probe)
         m_probe = [](const std::atomic_bool &cancelled) { return GpuDetector::detect(cancelled); };
@@ -95,7 +91,8 @@ GpuRecommendationDialog::GpuRecommendationDialog(
         m_installer = new ChickenRiceInstallService(this);
         m_ownsInstaller = true;
     }
-    setWindowTitle(QStringLiteral("鸡米饭 v1.10 下载准备"));
+    setWindowTitle(purpose == ChickenRicePurpose::Transcribe
+        ? QStringLiteral("鸡米饭 v1.10 日语识别组件") : QStringLiteral("鸡米饭 v1.10 下载准备"));
     setWindowModality(Qt::NonModal);
     setStyleSheet(playerStyleSheet());
     if (!m_embedded)
@@ -121,7 +118,7 @@ GpuRecommendationDialog::GpuRecommendationDialog(
         m_manualVariant->addItem(chickenRiceVariantDisplayName(variant) + QStringLiteral("（未验证）"),
                                  chickenRiceVariantKey(variant));
         m_manualVariant->setItemData(m_manualVariant->count() - 1,
-            chickenRiceArchiveName(variant), Qt::ToolTipRole);
+            chickenRiceArchiveName(variant, m_purpose), Qt::ToolTipRole);
     }
     m_recommendation = plainLabel(QStringLiteral("gpuRecommendation"), this);
     m_recommendation->setProperty("sectionTitle", true);
@@ -269,16 +266,16 @@ GpuRecommendationDialog::GpuRecommendationDialog(
     });
     connect(m_installer, &ChickenRiceInstallService::finished, this,
             [this](const ChickenRiceInstallResult &result) {
-        if (m_settings && result.state == ChickenRiceInstallState::Ready
-            && !result.engineDirectory.isEmpty()) {
-            m_settings->setValue(QStringLiteral("Ai/ChickenRice/engineDirectory"), result.engineDirectory);
+        const bool ready = std::exchange(m_awaitingInstallResult, false)
+            && result.state == ChickenRiceInstallState::Ready && !result.engineDirectory.isEmpty();
+        if (m_settings && ready) {
+            m_settings->setValue(m_componentGroup + QStringLiteral("/engineDirectory"), result.engineDirectory);
             m_settings->sync();
         }
         m_installCancelRequested = false;
         updatePresentation();
         QPointer<GpuRecommendationDialog> guard(this);
-        if (!m_shuttingDown && result.state == ChickenRiceInstallState::Ready
-            && !result.engineDirectory.isEmpty()) {
+        if (!m_shuttingDown && ready) {
             emit engineReady(result.engineDirectory);
             if (!guard)
                 return;
@@ -360,8 +357,8 @@ void GpuRecommendationDialog::restoreSelection()
     QString mode = QStringLiteral("auto");
     std::optional<ChickenRiceVariant> variant;
     if (m_settings) {
-        const auto savedMode = m_settings->value(SettingsPrefix + QStringLiteral("selectionMode"));
-        const auto savedVariant = m_settings->value(SettingsPrefix + QStringLiteral("manualVariant"));
+        const auto savedMode = m_settings->value(m_recommendationGroup + QStringLiteral("/selectionMode"));
+        const auto savedVariant = m_settings->value(m_recommendationGroup + QStringLiteral("/manualVariant"));
         if (savedVariant.metaType().id() == QMetaType::QString)
             variant = chickenRiceVariantFromKey(savedVariant.toString());
         if (savedMode.metaType().id() == QMetaType::QString
@@ -373,11 +370,13 @@ void GpuRecommendationDialog::restoreSelection()
         ? m_manualVariant->findData(chickenRiceVariantKey(*variant)) : 0);
     QString installRoot;
     if (m_settings) {
-        const auto savedRoot = m_settings->value(InstallRootKey);
+        const auto savedRoot = m_settings->value(m_componentGroup + QStringLiteral("/installRoot"));
         if (savedRoot.metaType().id() == QMetaType::QString)
             installRoot = normalizedInstallRoot(savedRoot.toString());
     }
-    m_installRoot->setText(installRoot.isEmpty() ? defaultInstallRoot() : installRoot);
+    if (installRoot.isEmpty())
+        installRoot = QDir(QStandardPaths::writableLocation(QStandardPaths::AppLocalDataLocation)).filePath(m_componentGroup);
+    m_installRoot->setText(installRoot);
     updatePresentation();
 }
 
@@ -498,7 +497,7 @@ void GpuRecommendationDialog::updatePresentation()
             "手动选择仅记录偏好；尚未验证该版本与所选 GPU 的兼容性。"));
         m_explanation->setVisible(!m_embedded);
         m_recommendation->setToolTip((selectedVariant
-            ? chickenRiceArchiveName(*selectedVariant) + QLatin1Char('\n') : QString())
+            ? chickenRiceArchiveName(*selectedVariant, m_purpose) + QLatin1Char('\n') : QString())
             + m_explanation->text());
         return;
     }
@@ -532,7 +531,7 @@ void GpuRecommendationDialog::updatePresentation()
         || recommendation.status == RecommendationStatus::DriverUpdateRequired
         || recommendation.status == RecommendationStatus::NoAutomaticMatch);
     m_recommendation->setToolTip((recommendation.variant
-        ? chickenRiceArchiveName(*recommendation.variant) + QLatin1Char('\n') : QString())
+        ? chickenRiceArchiveName(*recommendation.variant, m_purpose) + QLatin1Char('\n') : QString())
         + explanation);
 }
 
@@ -553,12 +552,12 @@ bool GpuRecommendationDialog::persistSelection(bool requireComplete)
     // Save independently: an unfinished path edit must not discard a valid
     // version preference, and invalid input never replaces the saved value.
     if (validMode) {
-        m_settings->setValue(SettingsPrefix + QStringLiteral("selectionMode"), mode);
+        m_settings->setValue(m_recommendationGroup + QStringLiteral("/selectionMode"), mode);
         if (mode == QStringLiteral("manual"))
-            m_settings->setValue(SettingsPrefix + QStringLiteral("manualVariant"), chickenRiceVariantKey(*variant));
+            m_settings->setValue(m_recommendationGroup + QStringLiteral("/manualVariant"), chickenRiceVariantKey(*variant));
     }
     if (!root.isEmpty())
-        m_settings->setValue(InstallRootKey, root);
+        m_settings->setValue(m_componentGroup + QStringLiteral("/installRoot"), root);
     m_settings->sync();
     if (m_settings->status() != QSettings::NoError) {
         m_selectionFeedback = QStringLiteral("设置自动保存失败，请检查设置存储位置。");
@@ -596,7 +595,7 @@ void GpuRecommendationDialog::updateInstallPresentation()
 {
     const bool installing = m_installer && m_installer->isBusy();
     const auto variant = selectedInstallVariant();
-    const auto package = variant ? chickenRicePackage(*variant) : std::nullopt;
+    const auto package = variant ? chickenRicePackage(*variant, m_purpose) : std::nullopt;
     const QString root = normalizedInstallRoot(m_installRoot->text());
     m_installRoot->setEnabled(!installing && !m_shuttingDown);
     m_browseInstallRootButton->setEnabled(!installing && !m_shuttingDown && !m_installFolderDialog);
@@ -711,7 +710,7 @@ void GpuRecommendationDialog::startInstallation()
     if (isBusy() || m_shuttingDown || !m_installer)
         return;
     const auto variant = selectedInstallVariant();
-    const auto package = variant ? chickenRicePackage(*variant) : std::nullopt;
+    const auto package = variant ? chickenRicePackage(*variant, m_purpose) : std::nullopt;
     const QString root = normalizedInstallRoot(m_installRoot->text());
     if (!package || root.isEmpty())
         return;
@@ -729,6 +728,7 @@ void GpuRecommendationDialog::startInstallation()
     request.package = *package;
     request.installRoot = root;
     QPointer<GpuRecommendationDialog> guard(this);
+    m_awaitingInstallResult = true;
     const bool started = m_installer->start(request);
     if (!guard)
         return;
@@ -736,6 +736,7 @@ void GpuRecommendationDialog::startInstallation()
         m_startedInstallVariant = variant;
         m_startedInstallRoot = root;
     } else {
+        m_awaitingInstallResult = false;
         m_installFeedback = QStringLiteral("当前无法开始准备，请稍后重试。");
     }
     updatePresentation();

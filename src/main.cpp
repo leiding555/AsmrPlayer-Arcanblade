@@ -34,6 +34,11 @@ int main(int argc, char *argv[])
         diagnosticOptions.directory = QDir(dataDirectory).filePath(QStringLiteral("Logs"));
     asmr::PlaybackDiagnosticLog diagnosticLog(diagnosticOptions);
     asmr::MainWindow window;
+    // A hidden main window can still be playing audio or generating subtitles.
+    // Quit only after its normal asynchronous shutdown has finished.
+    app.setQuitOnLastWindowClosed(false);
+    QObject::connect(&window, &asmr::MainWindow::shutdownFinished,
+                     &app, &QCoreApplication::quit, Qt::QueuedConnection);
     window.setPlaybackDiagnosticLog(&diagnosticLog);
     window.show();
     asmr::confirmUpdateStartup(app.arguments(), asmr::applicationBuildVersion());

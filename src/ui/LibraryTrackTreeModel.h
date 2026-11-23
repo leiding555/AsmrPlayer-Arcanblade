@@ -8,9 +8,10 @@ namespace asmr {
 // In-memory projection of an already queried work snapshot. No filesystem/SQL.
 class LibraryTrackTreeModel final : public QAbstractItemModel {
 public:
+    enum Column { NameColumn, DurationColumn, RelativePathColumn, FavoriteColumn, ColumnCount };
     enum DataRole {
         WorkIdRole = Qt::UserRole + 1, FileIdRole, RootPathRole, RelativePathRole,
-        MissingRole, PlayingRole, DirectoryRole, DurationRole, SubtitleAvailableRole,
+        MissingRole, PlayingRole, DirectoryRole, DurationRole, SubtitleAvailableRole, FavoriteRole,
     };
     explicit LibraryTrackTreeModel(QObject *parent = nullptr);
     ~LibraryTrackTreeModel() override;
@@ -32,6 +33,7 @@ public:
     void setTrackDuration(qint64 workId, qint64 fileId, std::optional<qint64> milliseconds);
     void clearWorkDurations(qint64 workId);
     void setSubtitleTracks(qint64 workId, const QSet<qint64> &audioFileIds);
+    void setFavoriteFileIds(const QSet<qint64> &audioFileIds);
     [[nodiscard]] qsizetype trackCount() const { return m_files.size(); }
     [[nodiscard]] QModelIndex indexForFileId(qint64 id) const;
     [[nodiscard]] QModelIndex indexForDirectory(const QString &path) const;
@@ -46,6 +48,7 @@ private:
     QVector<LibraryFile> m_files;
     QHash<qint64, qint64> m_durations;
     QSet<qint64> m_subtitleTracks;
+    QSet<qint64> m_favoriteFileIds;
     QSet<qint64> m_checkedTracks;
     bool m_batchSelectionEnabled = false;
     qint64 m_workId = 0;

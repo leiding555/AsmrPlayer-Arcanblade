@@ -2,9 +2,11 @@
 
 #include "subtitle/SubtitleEntry.h"
 
+#include <QByteArray>
 #include <QList>
 #include <QString>
 #include <QtGlobal>
+#include <optional>
 
 namespace asmr {
 
@@ -33,13 +35,13 @@ enum class SubtitleLoadDiagnosticSeverity
     Error
 };
 
-// Format-neutral diagnostics for callers; parser-specific codes remain available
-// on SrtParseResult / VttParseResult / LrcParseResult for the text parsers.
+enum class SrtDiagnosticCode;
 struct SubtitleLoadDiagnostic
 {
     SubtitleLoadDiagnosticSeverity severity;
     qsizetype line; // One-based source line.
     QString message;
+    std::optional<SrtDiagnosticCode> srtCode = std::nullopt;
 };
 
 struct SubtitleFileLoadResult
@@ -65,9 +67,11 @@ public:
     // The caller selects the format explicitly; no content/encoding guessing.
     // Usable entries within both resource limits constitute success; all parser
     // diagnostics are retained. Expanded text overflow rejects the entire load.
+    // When requested, sourceBytes receives the exact bytes of a successful load.
     // Synchronous work: GUI callers should invoke this outside the GUI thread.
     [[nodiscard]] static SubtitleFileLoadResult load(const QString &path,
-                                                    SubtitleFormat format);
+                                                    SubtitleFormat format,
+                                                    QByteArray *sourceBytes = nullptr);
 };
 
 } // namespace asmr

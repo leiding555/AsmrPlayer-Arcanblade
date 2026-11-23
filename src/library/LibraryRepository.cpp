@@ -13,6 +13,7 @@
 #include <QSqlQuery>
 #include <QThread>
 #include <QUuid>
+#include <QUrl>
 #include <QVariant>
 
 #include <filesystem>
@@ -410,12 +411,21 @@ LibraryOperationResult LibraryRepository::open()
     // Also releases a closed connection left after a failed transaction.
     releaseConnection();
     m_database = QSqlDatabase::addDatabase(QStringLiteral("QSQLITE"), m_connectionName);
-    m_database.setDatabaseName(m_databasePath == QStringLiteral(":memory:")
-                                   ? m_databasePath
-                                   : QFileInfo(m_databasePath).absoluteFilePath());
-    m_database.setConnectOptions(m_access == Access::ReadOnly
-        ? QStringLiteral("QSQLITE_OPEN_READONLY;QSQLITE_BUSY_TIMEOUT=1000")
-        : QStringLiteral("QSQLITE_BUSY_TIMEOUT=5000"));
+    const QString path = m_databasePath == QStringLiteral(":memory:")
+        ? m_databasePath : QFileInfo(m_databasePath).absoluteFilePath();
+    if (m_access == Access::ReadWriteExisting) {
+        // SQLite mode=rw cannot create a missing library. Keep UNC paths in
+        // the URI path rather than interpreting the server as a URI authority.
+        const QString prefix = path.startsWith(QStringLiteral("//")) ? QStringLiteral("file://") : QStringLiteral("file:");
+        m_database.setDatabaseName(prefix + QString::fromLatin1(QUrl::toPercentEncoding(path, "/:"))
+                                   + QStringLiteral("?mode=rw"));
+        m_database.setConnectOptions(QStringLiteral("QSQLITE_OPEN_URI;QSQLITE_BUSY_TIMEOUT=5000"));
+    } else {
+        m_database.setDatabaseName(path);
+        m_database.setConnectOptions(m_access == Access::ReadOnly
+            ? QStringLiteral("QSQLITE_OPEN_READONLY;QSQLITE_BUSY_TIMEOUT=1000")
+            : QStringLiteral("QSQLITE_BUSY_TIMEOUT=5000"));
+    }
     if (!m_database.open()) {
         const auto result = failure(LibraryDiagnosticCode::DatabaseError, m_databasePath,
                                     sqlMessage(QStringLiteral("Open database"), m_database.lastError()));
@@ -480,10 +490,10 @@ LibraryOperationResult LibraryRepository::prepareSchema(bool writing)
             QStringLiteral("旧开发数据库需要先备份再重建（当前格式 v%1）；未迁移或清空原数据。").arg(schemaVersion));
     }
     if (!writing && version != schemaVersion) {
-        if (m_access == Access::ReadOnly)
+        if (m_access != Access::ReadWrite)
             return reject(LibraryDiagnosticCode::UnsupportedSchemaVersion,
-                          QStringLiteral("Read-only access requires a current library database."));
-        // Creation and additive v4-v7 upgrades release this read snapshot,
+                          QStringLiteral("This access mode requires an existing, current library database."));
+        // Creation and additive upgrades release this read snapshot,
         // acquire the writer, then re-read and validate the entire schema.
         // A concurrent opener may already have completed the same operation.
         if (!m_database.rollback())
@@ -721,6 +731,70 @@ LibraryFilesResult LibraryRepository::files(qint64 workId)
     }
     result.success = true;
     return result;
+}
+
+LibraryFavoriteTracksResult LibraryRepository::favoriteTracks()
+{
+    const auto ready = checkReady();
+    LibraryFavoriteTracksResult result;
+    if (!ready.success) {
+        result.diagnostics = ready.diagnostics;
+        return result;
+    }
+    QSqlQuery query(m_database);
+    query.setForwardOnly(true);
+    if (!query.exec(QStringLiteral(
+            "SELECT w.id,w.root_path,w.display_name,w.imported_at_ms,"
+            "f.id,f.relative_path,f.file_name,f.extension,f.missing,t.added_at_ms "
+            "FROM track_favorites t JOIN work_files f ON f.id=t.audio_file_id AND f.type=0 "
+            "JOIN works w ON w.id=f.work_id ORDER BY t.added_at_ms DESC,t.id DESC"))) {
+        return failure<LibraryFavoriteTracksResult>(LibraryDiagnosticCode::DatabaseError, m_databasePath,
+            sqlMessage(QStringLiteral("Read favorite tracks"), query.lastError()));
+    }
+    while (query.next()) {
+        const auto workId = query.value(0).toLongLong();
+        result.tracks.push_back({
+            {workId, query.value(1).toString(), query.value(2).toString(), query.value(3).toLongLong()},
+            {query.value(4).toLongLong(), workId, query.value(5).toString(), query.value(6).toString(),
+             query.value(7).toString(), LibraryFileType::Audio, query.value(8).toBool()},
+            query.value(9).toLongLong()});
+    }
+    if (query.lastError().isValid()) {
+        return failure<LibraryFavoriteTracksResult>(LibraryDiagnosticCode::DatabaseError, m_databasePath,
+            sqlMessage(QStringLiteral("Read favorite track rows"), query.lastError()));
+    }
+    result.success = true;
+    return result;
+}
+
+LibraryOperationResult LibraryRepository::setTrackFavorite(qint64 workId, qint64 fileId, bool favorite)
+{
+    return writeSubtitleChange([&]() -> LibraryOperationResult {
+        QSqlQuery query(m_database);
+        query.prepare(QStringLiteral("SELECT 1 FROM work_files WHERE work_id=? AND id=? AND type=0"));
+        query.addBindValue(workId);
+        query.addBindValue(fileId);
+        if (!query.exec())
+            return failure(LibraryDiagnosticCode::DatabaseError, m_databasePath,
+                           sqlMessage(QStringLiteral("Find favorite track"), query.lastError()));
+        if (!query.next())
+            return failure(LibraryDiagnosticCode::StaleWorkSnapshot, m_databasePath,
+                           QStringLiteral("作品库中找不到该音轨，喜欢状态未保存。"));
+        query.finish();
+        if (favorite) {
+            query.prepare(QStringLiteral("INSERT INTO track_favorites(audio_file_id,added_at_ms) VALUES(?,?) "
+                                         "ON CONFLICT(audio_file_id) DO NOTHING"));
+            query.addBindValue(fileId);
+            query.addBindValue(QDateTime::currentMSecsSinceEpoch());
+        } else {
+            query.prepare(QStringLiteral("DELETE FROM track_favorites WHERE audio_file_id=?"));
+            query.addBindValue(fileId);
+        }
+        if (!query.exec())
+            return failure(LibraryDiagnosticCode::DatabaseError, m_databasePath,
+                           sqlMessage(QStringLiteral("Set track favorite"), query.lastError()));
+        return {true, {}};
+    });
 }
 
 LibraryOperationResult LibraryRepository::validateScan(const DirectoryScanResult &scan,

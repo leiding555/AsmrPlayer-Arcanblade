@@ -4,6 +4,7 @@
 #include <QDateTime>
 #include <functional>
 namespace asmr {
+enum class AiSubtitleValidation { Strict, RecoveredJapaneseAsr };
 struct AiSubtitleOutputRequest {
     QString audioPath;
     QString libraryRoot;
@@ -17,6 +18,7 @@ struct AiSubtitleOutputRequest {
     QDateTime audioModified;
     QString outputBatchId;
     QString outputFileSuffix;
+    AiSubtitleValidation validation = AiSubtitleValidation::Strict;
 };
 [[nodiscard]] bool validAiSubtitleOutputToken(const QString &token);
 // Worker-only. Creates a new owned batch directory, or verifies its immutable

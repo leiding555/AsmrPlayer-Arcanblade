@@ -4,7 +4,6 @@
 #include "update/SemanticVersion.h"
 
 #include <QHostAddress>
-#include <QJsonArray>
 #include <QJsonDocument>
 #include <QJsonObject>
 #include <QNetworkAccessManager>
@@ -13,9 +12,7 @@
 #include <QNetworkRequest>
 #include <QRegularExpression>
 #include <QTimer>
-#include <QUrlQuery>
 
-#include <algorithm>
 #include <cmath>
 
 namespace asmr {
@@ -23,11 +20,13 @@ namespace {
 using State = UpdateCheckState;
 using Result = UpdateCheckResult;
 const QString Repository = QStringLiteral("/leiding555/AsmrPlayer-Arcanblade");
-const QString ApiPath = QStringLiteral("/repos") + Repository + QStringLiteral("/releases");
+const QUrl ManifestEndpoint(QStringLiteral(
+    "https://leiding555.github.io/AsmrPlayer-Arcanblade/updates/windows-x64.json"));
+constexpr qint64 MaximumPackageBytes = 2LL * 1024 * 1024 * 1024;
 
-QUrl defaultEndpoint()
+QString windowsPackageName(const QString &version)
 {
-    return QUrl(QStringLiteral("https://api.github.com") + ApiPath + QStringLiteral("?per_page=100"));
+    return QStringLiteral("Arcanblade-") + version + QStringLiteral("-windows-x64.zip");
 }
 
 bool noUrlExtras(const QUrl &url)
@@ -43,37 +42,10 @@ bool loopback(const QUrl &url)
         || (address.setAddress(url.host()) && address.isLoopback());
 }
 
-bool pageQuery(const QUrl &url)
-{
-    QSet<QString> seen;
-    const auto items = QUrlQuery(url).queryItems(QUrl::FullyDecoded);
-    for (const auto &item : items) {
-        if (seen.contains(item.first)
-            || (item.first != QStringLiteral("page") && item.first != QStringLiteral("per_page")))
-            return false;
-        seen.insert(item.first);
-        bool ok = false;
-        const int value = item.second.toInt(&ok);
-        if (!ok || value <= 0 || value > (item.first == QStringLiteral("per_page") ? 100 : 1000000))
-            return false;
-    }
-    return true;
-}
-
 bool allowedEndpoint(const QUrl &url)
 {
-    if (!noUrlExtras(url) || !pageQuery(url)) return false;
-    if (loopback(url)) return !url.path().isEmpty();
-    return url.scheme() == QStringLiteral("https")
-        && url.host() == QStringLiteral("api.github.com")
-        && (url.port() == -1 || url.port() == 443) && url.path(QUrl::FullyDecoded) == ApiPath;
-}
-
-bool samePageEndpoint(const QUrl &url, const QUrl &initial)
-{
-    return allowedEndpoint(url) && url.scheme() == initial.scheme() && url.host() == initial.host()
-        && url.port() == initial.port()
-        && url.path(QUrl::FullyDecoded) == initial.path(QUrl::FullyDecoded);
+    return noUrlExtras(url) && !url.hasQuery()
+        && (url == ManifestEndpoint || (loopback(url) && !url.path().isEmpty()));
 }
 
 Result failure(const QString &message)
@@ -92,10 +64,6 @@ QDateTime retryTime(QNetworkReply *reply)
     const auto seconds = raw.toLongLong(&ok);
     if (ok && seconds >= 0 && seconds <= 7 * 24 * 60 * 60) retry = now.addSecs(seconds);
     if (!retry.isValid() && !raw.isEmpty()) retry = QDateTime::fromString(QString::fromLatin1(raw), Qt::RFC2822Date).toUTC();
-    if (!retry.isValid()) {
-        const auto reset = reply->rawHeader("X-RateLimit-Reset").trimmed().toLongLong(&ok);
-        if (ok && reset > 0) retry = QDateTime::fromSecsSinceEpoch(reset).toUTC();
-    }
     if (!retry.isValid() || retry < now || retry > now.addDays(7)) return {};
     return retry;
 }
@@ -116,13 +84,12 @@ bool isDownloadableUpdateRelease(const UpdateRelease &release)
 {
     const auto version = SemanticVersion::parse(release.version);
     if (!version || !isAllowedReleasePageUrl(release.pageUrl)
-        || release.packageSize <= 0 || release.packageSize > 2LL * 1024 * 1024 * 1024)
+        || release.packageSize <= 0 || release.packageSize > MaximumPackageBytes)
         return false;
     const auto tag = release.pageUrl.path(QUrl::FullyDecoded).section(QLatin1Char('/'), -1);
     const auto tagged = SemanticVersion::parse(tag, true);
     if (!tagged || tagged->toString() != release.version) return false;
-    const QString name = QStringLiteral("Arcanblade-") + release.version
-        + QStringLiteral("-windows-x64.zip");
+    const auto name = windowsPackageName(release.version);
     const auto allowed = [&](const QUrl &url, const QString &file) {
         return noUrlExtras(url) && url.scheme() == QStringLiteral("https")
             && url.host() == QStringLiteral("github.com") && !url.hasQuery()
@@ -130,97 +97,75 @@ bool isDownloadableUpdateRelease(const UpdateRelease &release)
             && url.path(QUrl::FullyDecoded) == Repository + QStringLiteral("/releases/download/")
                 + tag + QLatin1Char('/') + file;
     };
-    static const QRegularExpression digest(QStringLiteral("^[0-9a-fA-F]{64}$"));
+    static const QRegularExpression digest(QStringLiteral(R"(\A[0-9a-fA-F]{64}\z)"));
     return allowed(release.packageUrl, name)
         && allowed(release.checksumUrl, name + QStringLiteral(".sha256"))
         && (release.packageSha256.isEmpty() || digest.match(release.packageSha256).hasMatch());
 }
+
+namespace {
+struct ManifestRelease {
+    SemanticVersion version;
+    UpdateRelease release;
+};
+
+std::optional<ManifestRelease> parseManifestRelease(const QJsonValue &value, bool prerelease)
+{
+    if (!value.isObject()) return std::nullopt;
+    const auto entry = value.toObject();
+    const auto tag = entry.value(QStringLiteral("tag")).toString();
+    const auto version = SemanticVersion::parse(tag, true);
+    const auto size = entry.value(QStringLiteral("size")).toDouble();
+    const auto hash = entry.value(QStringLiteral("sha256")).toString();
+    const auto notes = entry.value(QStringLiteral("notes"));
+    if (!version || version->isPrerelease() != prerelease || !notes.isString()
+        || !(size >= 1 && size <= MaximumPackageBytes) || size != std::floor(size)
+        || hash.isEmpty())
+        return std::nullopt;
+
+    UpdateRelease release;
+    release.version = version->toString();
+    release.title = QStringLiteral("Arcanblade ") + tag;
+    release.notes = notes.toString();
+    release.prerelease = prerelease;
+    release.packageSize = static_cast<qint64>(size);
+    release.packageSha256 = hash.toLower();
+    const auto base = QStringLiteral("https://github.com") + Repository;
+    const auto file = windowsPackageName(release.version);
+    const auto downloadBase = base + QStringLiteral("/releases/download/") + tag + QLatin1Char('/');
+    release.pageUrl = QUrl(base + QStringLiteral("/releases/tag/") + tag);
+    release.packageUrl = QUrl(downloadBase + file);
+    release.checksumUrl = QUrl(downloadBase + file + QStringLiteral(".sha256"));
+    if (!isDownloadableUpdateRelease(release)) return std::nullopt;
+    return ManifestRelease{*version, release};
+}
+} // namespace
 
 UpdateCheckResult selectUpdateRelease(const QByteArray &json, const QString &currentVersion,
                                       bool includePrereleases)
 {
     const auto current = SemanticVersion::parse(currentVersion);
     if (!current) return failure(QStringLiteral("当前程序版本无效，无法检查更新。"));
-    QJsonParseError parseError;
-    const auto document = QJsonDocument::fromJson(json, &parseError);
-    if (parseError.error != QJsonParseError::NoError || !document.isArray())
-        return failure(QStringLiteral("GitHub 返回的版本列表格式无效，请稍后重试。"));
+    const auto manifest = QJsonDocument::fromJson(json).object();
+    if (manifest.value(QStringLiteral("schema")).toDouble() != 1)
+        return failure(QStringLiteral("更新清单格式无效或版本不受支持，请查看 GitHub 发行页面。"));
+
+    const auto stable = parseManifestRelease(manifest.value(QStringLiteral("stable")), false);
+    const auto prereleaseEntry = manifest.value(QStringLiteral("prerelease"));
+    const auto preview = parseManifestRelease(prereleaseEntry, true);
+    if (!stable || (!prereleaseEntry.isNull() && !preview))
+        return failure(QStringLiteral("更新清单中的发行信息无效，请查看 GitHub 发行页面。"));
+
+    const auto &selected = includePrereleases && preview
+        && SemanticVersion::compare(preview->version, stable->version) > 0 ? *preview : *stable;
     Result result;
-    result.state = State::UpToDate;
-    result.message = QStringLiteral("当前已是所选更新通道的最新版本。");
-    auto best = *current;
-    for (const auto &value : document.array()) {
-        if (!value.isObject()) continue;
-        const auto object = value.toObject();
-        const auto draft = object.value(QStringLiteral("draft"));
-        const auto preview = object.value(QStringLiteral("prerelease"));
-        if (!draft.isBool() || !preview.isBool() || draft.toBool()) continue;
-        const auto tagValue = object.value(QStringLiteral("tag_name"));
-        if (!tagValue.isString()) continue;
-        const auto tag = tagValue.toString();
-        const auto version = SemanticVersion::parse(tag, true);
-        if (!version || SemanticVersion::compare(*version, best) <= 0) continue;
-        const bool prerelease = preview.toBool() || version->isPrerelease();
-        if (!includePrereleases && prerelease) continue;
-        const QUrl pageUrl(object.value(QStringLiteral("html_url")).toString(), QUrl::StrictMode);
-        if (!isAllowedReleasePageUrl(pageUrl)
-            || pageUrl.path(QUrl::FullyDecoded) != Repository + QStringLiteral("/releases/tag/") + tag)
-            continue;
-        const QString expectedName = QStringLiteral("Arcanblade-") + version->toString()
-            + QStringLiteral("-windows-x64.zip");
-        bool hasPackage = false;
-        QJsonObject package;
-        QJsonObject checksum;
-        int packageCount = 0;
-        int checksumCount = 0;
-        for (const auto &assetValue : object.value(QStringLiteral("assets")).toArray()) {
-            const auto asset = assetValue.toObject();
-            if (asset.value(QStringLiteral("name")).toString() == expectedName
-                && asset.value(QStringLiteral("state")).toString() == QStringLiteral("uploaded")
-                && asset.value(QStringLiteral("size")).toDouble() > 0) {
-                hasPackage = true;
-                package = asset;
-                ++packageCount;
-            }
-            if (asset.value(QStringLiteral("name")).toString() == expectedName + QStringLiteral(".sha256")
-                && asset.value(QStringLiteral("state")).toString() == QStringLiteral("uploaded")
-                && asset.value(QStringLiteral("size")).toDouble() > 0
-                && asset.value(QStringLiteral("size")).toDouble() <= 65536) {
-                checksum = asset;
-                ++checksumCount;
-            }
-        }
-        if (!hasPackage) continue;
-        best = *version;
+    if (SemanticVersion::compare(selected.version, *current) <= 0) {
+        result.state = State::UpToDate;
+        result.message = QStringLiteral("当前已是所选更新通道的最新版本。");
+    } else {
         result.state = State::UpdateAvailable;
-        result.message = QStringLiteral("发现新版本 %1。").arg(version->toString());
-        result.release.version = version->toString();
-        result.release.title = object.value(QStringLiteral("name")).toString().trimmed();
-        if (result.release.title.isEmpty()) result.release.title = tag;
-        result.release.notes = object.value(QStringLiteral("body")).toString();
-        result.release.pageUrl = pageUrl;
-        result.release.prerelease = prerelease;
-        result.release.packageUrl = {};
-        result.release.checksumUrl = {};
-        result.release.packageSize = 0;
-        result.release.packageSha256.clear();
-        const double packageSize = package.value(QStringLiteral("size")).toDouble();
-        const QString digest = package.value(QStringLiteral("digest")).toString();
-        static const QRegularExpression assetDigest(QStringLiteral("^sha256:[0-9a-fA-F]{64}$"));
-        if (packageCount == 1 && checksumCount == 1 && std::isfinite(packageSize)
-            && packageSize == std::floor(packageSize) && packageSize <= 2.0 * 1024 * 1024 * 1024
-            && (digest.isEmpty() || assetDigest.match(digest).hasMatch())) {
-            result.release.packageUrl = QUrl(package.value(QStringLiteral("browser_download_url")).toString(), QUrl::StrictMode);
-            result.release.checksumUrl = QUrl(checksum.value(QStringLiteral("browser_download_url")).toString(), QUrl::StrictMode);
-            result.release.packageSize = qint64(packageSize);
-            result.release.packageSha256 = digest.mid(7).toLower();
-            if (!isDownloadableUpdateRelease(result.release)) {
-                result.release.packageUrl = {};
-                result.release.checksumUrl = {};
-                result.release.packageSize = 0;
-                result.release.packageSha256.clear();
-            }
-        }
+        result.release = selected.release;
+        result.message = QStringLiteral("发现新版本 %1。").arg(selected.release.version);
     }
     return result;
 }
@@ -234,7 +179,7 @@ UpdateCheckService::UpdateCheckService(const UpdateCheckOptions &options, QObjec
     : QObject(parent), m_options(options), m_manager(new QNetworkAccessManager(this)),
       m_timeout(new QTimer(this))
 {
-    if (m_options.endpoint.isEmpty()) m_options.endpoint = defaultEndpoint();
+    if (m_options.endpoint.isEmpty()) m_options.endpoint = ManifestEndpoint;
     if (loopback(m_options.endpoint)) m_manager->setProxy(QNetworkProxy::NoProxy);
     qRegisterMetaType<UpdateCheckResult>();
     m_timeout->setSingleShot(true);
@@ -259,14 +204,7 @@ bool UpdateCheckService::start(const QString &currentVersion, bool includePrerel
     m_busy = true;
     m_completing = false;
     m_result = {};
-    m_best = {};
-    m_best.state = State::UpToDate;
-    m_best.message = QStringLiteral("当前已是所选更新通道的最新版本。");
     m_response.clear();
-    m_seenPages.clear();
-    m_totalResponseBytes = 0;
-    m_previousPageBytes = 0;
-    m_pageCount = 0;
     m_currentVersion = currentVersion;
     m_includePrereleases = includePrereleases;
     QPointer<UpdateCheckService> guard(this);
@@ -277,8 +215,7 @@ bool UpdateCheckService::start(const QString &currentVersion, bool includePrerel
         error = QStringLiteral("当前程序版本无效，无法检查更新。");
     else if (!allowedEndpoint(m_options.endpoint) || m_options.timeoutMs <= 0
         || m_options.timeoutMs > 120000 || m_options.maximumResponseBytes <= 0
-        || m_options.maximumResponseBytes > 16 * 1024 * 1024
-        || m_options.maximumPages <= 0 || m_options.maximumPages > 20)
+        || m_options.maximumResponseBytes > 16 * 1024 * 1024)
         error = QStringLiteral("更新检查配置无效，未发送网络请求。");
     if (!error.isEmpty()) {
         QTimer::singleShot(0, this, [this, generation, error] {
@@ -287,7 +224,7 @@ bool UpdateCheckService::start(const QString &currentVersion, bool includePrerel
         return true;
     }
     m_timeout->start(m_options.timeoutMs);
-    requestPage(m_options.endpoint, generation);
+    requestManifest(generation);
     return true;
 }
 
@@ -301,34 +238,24 @@ void UpdateCheckService::cancel()
     }
 }
 
-void UpdateCheckService::requestPage(const QUrl &url, quint64 generation)
+void UpdateCheckService::requestManifest(quint64 generation)
 {
     if (!m_busy || m_completing || generation != m_generation) return;
-    const QString identity = url.toString(QUrl::FullyEncoded);
-    if (m_seenPages.contains(identity) || m_pageCount >= m_options.maximumPages) {
-        complete(failure(QStringLiteral("GitHub 版本列表分页异常，请直接查看发行页面。")));
-        return;
-    }
-    m_seenPages.insert(identity);
-    ++m_pageCount;
-    m_previousPageBytes = m_totalResponseBytes;
-    m_response.clear();
-    QNetworkRequest request(url);
-    request.setRawHeader("Accept", "application/vnd.github+json");
+    QNetworkRequest request(m_options.endpoint);
+    request.setRawHeader("Accept", "application/json");
     request.setRawHeader("User-Agent", QByteArray("Arcanblade/") + applicationBuildVersion().toLatin1());
-    request.setRawHeader("X-GitHub-Api-Version", "2026-03-10");
     request.setAttribute(QNetworkRequest::RedirectPolicyAttribute, QNetworkRequest::ManualRedirectPolicy);
     request.setAttribute(QNetworkRequest::CookieLoadControlAttribute, QNetworkRequest::Manual);
     request.setAttribute(QNetworkRequest::CookieSaveControlAttribute, QNetworkRequest::Manual);
     auto *reply = m_manager->get(request);
     m_reply = reply;
-    reply->setReadBufferSize(m_options.maximumResponseBytes - m_totalResponseBytes + 1);
+    reply->setReadBufferSize(m_options.maximumResponseBytes + 1);
     connect(reply, &QNetworkReply::metaDataChanged, this, [this, reply, generation] {
         if (!m_busy || m_completing || m_reply != reply || generation != m_generation) return;
         bool ok = false;
         const qint64 length = reply->header(QNetworkRequest::ContentLengthHeader).toLongLong(&ok);
-        if (ok && length > m_options.maximumResponseBytes - m_previousPageBytes)
-            complete(failure(QStringLiteral("GitHub 版本列表过大，已停止检查更新。")));
+        if (ok && length > m_options.maximumResponseBytes)
+            complete(failure(QStringLiteral("更新清单过大，已停止检查更新。")));
     });
     connect(reply, &QIODevice::readyRead, this,
         [this, reply, generation] { readAvailable(reply, generation); });
@@ -339,12 +266,10 @@ void UpdateCheckService::requestPage(const QUrl &url, quint64 generation)
 void UpdateCheckService::readAvailable(QNetworkReply *reply, quint64 generation)
 {
     if (!m_busy || m_completing || m_reply != reply || generation != m_generation) return;
-    const auto remaining = m_options.maximumResponseBytes - m_totalResponseBytes;
-    const auto bytes = reply->read(remaining + 1);
-    m_response += bytes;
-    m_totalResponseBytes += bytes.size();
-    if (m_totalResponseBytes > m_options.maximumResponseBytes)
-        complete(failure(QStringLiteral("GitHub 版本列表过大，已停止检查更新。")));
+    const auto remaining = m_options.maximumResponseBytes - m_response.size();
+    m_response += reply->read(remaining + 1);
+    if (m_response.size() > m_options.maximumResponseBytes)
+        complete(failure(QStringLiteral("更新清单过大，已停止检查更新。")));
 }
 
 void UpdateCheckService::replyFinished(QNetworkReply *reply, quint64 generation)
@@ -354,12 +279,10 @@ void UpdateCheckService::replyFinished(QNetworkReply *reply, quint64 generation)
     readAvailable(reply, generation);
     if (!guard || !m_busy || m_completing || m_reply != reply || generation != m_generation) return;
     const int status = reply->attribute(QNetworkRequest::HttpStatusCodeAttribute).toInt();
-    if (status == 403 || status == 429) {
-        auto result = failure(status == 429
-            ? QStringLiteral("GitHub 请求达到限额，请稍后再试。")
-            : QStringLiteral("GitHub 拒绝访问或请求达到限额，请稍后再试。"));
+    if (status == 429) {
+        auto result = failure(QStringLiteral("更新清单请求受到限流，请稍后再试。"));
         result.retryAfterUtc = retryTime(reply);
-        if (!result.retryAfterUtc.isValid() && status == 429)
+        if (!result.retryAfterUtc.isValid())
             result.retryAfterUtc = QDateTime::currentDateTimeUtc().addSecs(60);
         complete(result);
         return;
@@ -369,47 +292,10 @@ void UpdateCheckService::replyFinished(QNetworkReply *reply, quint64 generation)
         return;
     }
     if (reply->error() != QNetworkReply::NoError || status != 200) {
-        complete(failure(QStringLiteral("无法检查更新，请检查网络、代理或证书后重试。")));
+        complete(failure(QStringLiteral("无法读取更新清单，请稍后重试或查看 GitHub 发行页面。")));
         return;
     }
-    auto result = selectUpdateRelease(m_response, m_currentVersion, m_includePrereleases);
-    if (result.state == State::Failed) {
-        complete(result);
-        return;
-    }
-    if (result.state == State::UpdateAvailable
-        && (m_best.state != State::UpdateAvailable || SemanticVersion::compare(
-                *SemanticVersion::parse(result.release.version),
-                *SemanticVersion::parse(m_best.release.version)) > 0))
-        m_best = result;
-    QUrl next;
-    static const QRegularExpression linkExpression(
-        QStringLiteral(R"link(<([^<>]+)>\s*;\s*rel\s*=\s*"([^"]+)")link"),
-        QRegularExpression::CaseInsensitiveOption);
-    auto links = linkExpression.globalMatch(QString::fromLatin1(reply->rawHeader("Link")));
-    while (links.hasNext()) {
-        const auto link = links.next();
-        if (!link.captured(2).split(QLatin1Char(' '), Qt::SkipEmptyParts).contains(QStringLiteral("next")))
-            continue;
-        if (!next.isEmpty()) {
-            complete(failure(QStringLiteral("GitHub 版本列表分页异常，请直接查看发行页面。")));
-            return;
-        }
-        next = reply->url().resolved(QUrl(link.captured(1), QUrl::StrictMode));
-        if (!samePageEndpoint(next, m_options.endpoint)) {
-            complete(failure(QStringLiteral("GitHub 返回了无效的分页地址，已停止检查更新。")));
-            return;
-        }
-    }
-    m_reply.clear();
-    disconnect(reply, nullptr, this, nullptr);
-    reply->deleteLater();
-    if (!next.isEmpty()) {
-        // Leave the transport's finished stack before starting another request.
-        QTimer::singleShot(0, this, [this, next, generation] { requestPage(next, generation); });
-    } else {
-        complete(m_best);
-    }
+    complete(selectUpdateRelease(m_response, m_currentVersion, m_includePrereleases));
 }
 
 void UpdateCheckService::complete(UpdateCheckResult result)

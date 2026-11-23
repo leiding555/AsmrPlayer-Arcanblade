@@ -89,6 +89,18 @@ struct LibraryFilesResult : LibraryOperationResult {
     QVector<LibraryFile> files;
 };
 
+struct LibraryFavoriteTrack {
+    LibraryWork work;
+    LibraryFile file;
+    qint64 addedAtMs = 0;
+
+    bool operator==(const LibraryFavoriteTrack &) const = default;
+};
+
+struct LibraryFavoriteTracksResult : LibraryOperationResult {
+    QVector<LibraryFavoriteTrack> tracks;
+};
+
 // Coherent database-only snapshot, including missing historical files. The file
 // order is relative path (SQLite BINARY), then stable file ID.
 struct LibraryWorkSnapshotResult : LibraryOperationResult {
@@ -208,7 +220,7 @@ struct LibraryPlaybackProgressWriteResult : LibraryOperationResult {
 // or query object is exposed to callers.
 class LibraryRepository final {
 public:
-    enum class Access { ReadWrite, ReadOnly };
+    enum class Access { ReadWrite, ReadOnly, ReadWriteExisting };
     explicit LibraryRepository(QString databasePath, Access access = Access::ReadWrite);
     ~LibraryRepository();
 
@@ -232,6 +244,9 @@ public:
     LibraryOperationResult setWorkCategory(const LibraryWork &expectedWork,
         const WorkCategory &expectedCategory, bool present);
     LibraryFilesResult files(qint64 workId);
+    // Newest first, including scan-missing audio. Repeated adds preserve original order.
+    LibraryFavoriteTracksResult favoriteTracks();
+    LibraryOperationResult setTrackFavorite(qint64 workId, qint64 fileId, bool favorite);
     LibraryWorkSnapshotResult workSnapshot(qint64 workId);
     LibraryWorkBrowseResult workBrowseSnapshot(qint64 workId);
 
@@ -314,6 +329,8 @@ public:
         SubtitleBindingAvailabilityPolicy availabilityPolicy = SubtitleBindingAvailabilityPolicy::AllowMissing);
     LibrarySubtitleBindingsResult subtitleBindings(qint64 audioFileId);
     LibraryTrackSubtitlesResult trackSubtitles(qint64 workId, qint64 audioFileId);
+    LibraryOperationResult bindRecommendedSubtitle(const LibraryTrackSubtitlesResult &expected,
+                                                    qint64 subtitleFileId);
     // Worker-only filesystem check followed by a short atomic cleanup. Only
     // confirmed absent subtitle files are removed; offline or inaccessible
     // directories retain their records. Related bindings and explicit defaults

@@ -34,7 +34,6 @@ public:
 signals:
     void addRootRequested();
     void removeRootRequested(const QString &root);
-    void refreshRootRequested(const QString &root);
     void refreshAllRequested();
     void startupScanChanged(bool enabled);
     void reviewOverlapsRequested(const QString &root);
@@ -55,7 +54,6 @@ private:
     QCheckBox *m_startup = nullptr;
     QPushButton *m_add = nullptr;
     QAction *m_remove = nullptr;
-    QAction *m_refresh = nullptr;
     QPushButton *m_refreshAll = nullptr;
     QAction *m_reviewOverlaps = nullptr;
     QMenu *m_contextMenu = nullptr;

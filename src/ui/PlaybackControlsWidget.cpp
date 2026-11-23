@@ -1,6 +1,7 @@
 #include "ui/PlaybackControlsWidget.h"
 
 #include "ui/CoverArtWidget.h"
+#include "ui/FavoriteIcon.h"
 #include "ui/TimeFormat.h"
 
 #include <QAction>
@@ -43,7 +44,7 @@ namespace {
 
 // Local painted icons avoid font-dependent glyphs and another asset dependency.
 // These are presentation only; clicks still travel through the existing intentions.
-enum class BarIcon { Play, Pause, Previous, Next, Queue, Volume, Muted, Sequential, RepeatAll, RepeatOne, Shuffle, Subtitles, Panel, Desktop };
+enum class BarIcon { Play, Pause, Favorite, Liked, Previous, Next, Queue, Volume, Muted, Sequential, RepeatAll, RepeatOne, Shuffle, Subtitles, Panel, Desktop };
 
 BarIcon modeIcon(PlaybackMode mode)
 {
@@ -96,6 +97,12 @@ QIcon barIcon(BarIcon symbol, const QColor &normal = QColor("#BDC4CE"))
             case BarIcon::Pause:
                 painter.fillRect(QRectF(6.5, 5, 4, 14), color);
                 painter.fillRect(QRectF(13.5, 5, 4, 14), color);
+                break;
+            case BarIcon::Favorite:
+            case BarIcon::Liked:
+                if (symbol == BarIcon::Liked)
+                    painter.setBrush(color);
+                painter.drawPath(favoriteHeartPath());
                 break;
             case BarIcon::Sequential:
             case BarIcon::RepeatAll:
@@ -227,6 +234,16 @@ QIcon barIcon(BarIcon symbol, const QColor &normal = QColor("#BDC4CE"))
     }
     return icon;
 }
+
+class FavoriteButton final : public QPushButton
+{
+public:
+    using QPushButton::QPushButton;
+
+protected:
+    // The checked state reflects the last confirmed library write.
+    void nextCheckState() override {}
+};
 
 class PlaybackPopupMenu final : public QMenu
 {
@@ -661,6 +678,11 @@ PlaybackControlsWidget::PlaybackControlsWidget(QWidget *parent)
     m_playPauseButton->setFixedSize(48, 48);
     m_playPauseButton->setIconSize(QSize(24, 24));
     updatePlayAction(false);
+    m_favoriteButton = new FavoriteButton(m_transport);
+    m_favoriteButton->setObjectName(QStringLiteral("playbackFavoriteButton"));
+    m_favoriteButton->setCheckable(true);
+    m_favoriteButton->setAccessibleName(QStringLiteral("喜欢当前音轨"));
+    setFavoriteState(false, false);
     m_playbackModeButton = new QPushButton(m_transport);
     m_playbackModeButton->setObjectName(QStringLiteral("playbackModeButton"));
     m_volumeButton = new QPushButton(m_transport);
@@ -746,7 +768,7 @@ PlaybackControlsWidget::PlaybackControlsWidget(QWidget *parent)
     m_nextButton->setIcon(barIcon(BarIcon::Next));
     m_nextButton->setAccessibleName(QStringLiteral("下一首"));
     m_nextButton->setToolTip(QStringLiteral("播放队列中的下一首"));
-    for (auto *button : {m_playbackModeButton, m_previousButton, m_nextButton, m_volumeButton}) {
+    for (auto *button : {m_favoriteButton, m_playbackModeButton, m_previousButton, m_nextButton, m_volumeButton}) {
         button->setFixedSize(32, 32);
         button->setIconSize(QSize(22, 22));
         button->setProperty("playbackTransportAction", true);
@@ -755,9 +777,8 @@ PlaybackControlsWidget::PlaybackControlsWidget(QWidget *parent)
     m_volumeButton->setIconSize(QSize(24, 24));
     setQueueNavigationAvailable(false, false);
     auto *transportRow = new QHBoxLayout(m_transport);
-    transportRow->setContentsMargins(0, 0, 0, 0);
-    transportRow->setSpacing(10);
     transportRow->addStretch();
+    transportRow->addWidget(m_favoriteButton);
     transportRow->addWidget(m_playbackModeButton);
     transportRow->addWidget(m_previousButton);
     transportRow->addWidget(m_playPauseButton);
@@ -840,25 +861,19 @@ PlaybackControlsWidget::PlaybackControlsWidget(QWidget *parent)
     auxiliaryRow->addWidget(m_toggleQueueButton);
 
     m_barLayout = new QGridLayout;
-    m_barLayout->setHorizontalSpacing(22);
     m_barLayout->setVerticalSpacing(5);
-    m_barLayout->addWidget(m_identity, 0, 0, 2, 1);
-    m_barLayout->addWidget(m_transport, 0, 1);
-    m_barLayout->addWidget(m_timeline, 1, 1);
-    m_barLayout->addWidget(m_auxiliary, 0, 2, 2, 1);
-    m_barLayout->setColumnStretch(0, 3);
-    m_barLayout->setColumnStretch(1, 5);
-    m_barLayout->setColumnStretch(2, 2);
     auto *layout = new QVBoxLayout(this);
     // A previous wide grid must not clamp the resize before compact placement.
     layout->setSizeConstraint(QLayout::SetNoConstraint);
     layout->setContentsMargins(18, 14, 18, 14);
     layout->setSpacing(8);
     layout->addLayout(m_barLayout);
+    updateBarLayout();
 
     setFocusPolicy(Qt::StrongFocus);
     setFocusProxy(m_playbackModeButton);
-    setTabOrder(m_coverButton, m_playbackModeButton);
+    setTabOrder(m_coverButton, m_favoriteButton);
+    setTabOrder(m_favoriteButton, m_playbackModeButton);
     setTabOrder(m_playbackModeButton, m_previousButton);
     setTabOrder(m_previousButton, m_playPauseButton);
     setTabOrder(m_playPauseButton, m_nextButton);
@@ -885,6 +900,8 @@ PlaybackControlsWidget::PlaybackControlsWidget(QWidget *parent)
             this, &PlaybackControlsWidget::toggleQueueRequested);
     connect(m_playPauseButton, &QPushButton::clicked,
             this, &PlaybackControlsWidget::playPauseRequested);
+    connect(m_favoriteButton, &QPushButton::clicked,
+            this, &PlaybackControlsWidget::favoriteToggleRequested);
     connect(m_playbackModeButton, &QPushButton::clicked, this, [this] {
         togglePopup(m_playbackModePopup, m_playbackModeButton);
     });
@@ -992,6 +1009,17 @@ void PlaybackControlsWidget::setFloatingSubtitleVisible(bool visible)
                                              : QStringLiteral("显示桌面字幕"));
 }
 
+void PlaybackControlsWidget::setFavoriteState(bool available, bool liked)
+{
+    if (m_favoriteButton->icon().isNull() || m_favoriteButton->isChecked() != liked) {
+        m_favoriteButton->setChecked(liked);
+        m_favoriteButton->setIcon(liked ? barIcon(BarIcon::Liked, QColor("#FF696E"))
+                                        : barIcon(BarIcon::Favorite));
+    }
+    m_favoriteButton->setEnabled(available);
+    m_favoriteButton->setToolTip(liked ? QStringLiteral("取消喜欢") : QStringLiteral("喜欢当前音轨"));
+}
+
 void PlaybackControlsWidget::setQueueNavigationAvailable(bool previous, bool next)
 {
     // Queue navigation remains usable after media failure and while a resume
@@ -1044,6 +1072,11 @@ void PlaybackControlsWidget::updateBarLayout()
     if (m_barLayoutMode == mode)
         return;
     m_barLayoutMode = mode;
+    const int spacing = mode == 0 ? 6 : 10;
+    m_transport->layout()->setSpacing(spacing);
+    // On wide layouts keep play/pause centered over the timeline.
+    const int rightMargin = mode == 2 ? m_favoriteButton->width() + spacing : 0;
+    m_transport->layout()->setContentsMargins(0, 0, rightMargin, 0);
     m_coverLabel->setFixedSize(mode == 0 ? 48 : 64, mode == 0 ? 48 : 64);
     m_coverButton->setGeometry(m_coverLabel->rect());
     for (auto *widget : {m_identity, m_transport, m_timeline, m_auxiliary})

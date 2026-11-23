@@ -143,8 +143,15 @@ protected:
 };
 
 using State = AiSubtitleTaskState;
-const QString Prefix = QStringLiteral("Ai/ChickenRice/");
-const QString GenerationSettingsKey = Prefix + QStringLiteral("generationOptions");
+const QString RecognitionEngineKey = QStringLiteral("Ai/JapaneseAsr/engine");
+const QString FasterWhisperKey = QStringLiteral("faster-whisper-xxl");
+const QString ChickenRiceKey = QStringLiteral("chicken-rice");
+
+QString chickenRiceSettingsPrefix(ChickenRicePurpose purpose)
+{
+    return purpose == ChickenRicePurpose::Transcribe
+        ? QStringLiteral("Ai/ChickenRiceAsr/") : QStringLiteral("Ai/ChickenRice/");
+}
 
 // Draw the marks instead of depending on a font's coverage of check/cross glyphs.
 QLabel *statusIcon(const QString &name, QWidget *parent)
@@ -229,17 +236,11 @@ QString outputNameKey(const QString &audioPath)
     return key;
 }
 
-QString defaultRoot()
-{
-    return QDir(QStandardPaths::writableLocation(QStandardPaths::AppLocalDataLocation))
-        .filePath(QStringLiteral("Ai/ChickenRice"));
-}
-
-QString stringSetting(QSettings *settings, const QString &name)
+QString stringSetting(QSettings *settings, const QString &key)
 {
     if (!settings)
         return {};
-    const QVariant value = settings->value(Prefix + name);
+    const QVariant value = settings->value(key);
     return value.metaType().id() == QMetaType::QString ? value.toString() : QString();
 }
 
@@ -545,6 +546,19 @@ ChickenRiceTranslateDialog::ChickenRiceTranslateDialog(
     settingsHeadingRow->addWidget(backButton);
     settingsHeadingRow->addWidget(m_settingsHeading, 1);
     settingsLayout->addLayout(settingsHeadingRow);
+    m_recognitionEngineRow = new QWidget(m_settingsPage);
+    auto *recognitionForm = new QFormLayout(m_recognitionEngineRow);
+    recognitionForm->setContentsMargins(0, 0, 0, 0);
+    m_recognitionEngine = new QComboBox(m_recognitionEngineRow);
+    m_recognitionEngine->setObjectName(QStringLiteral("japaneseRecognitionEngine"));
+    m_recognitionEngine->addItem(QStringLiteral("Faster-Whisper-XXL · GPU 加速仅限 NVIDIA"), FasterWhisperKey);
+    m_recognitionEngine->addItem(QStringLiteral("Chicken Rice · GPU 加速支持 NVIDIA / 部分 AMD（A 卡）"), ChickenRiceKey);
+    m_recognitionEngine->setItemData(0, QStringLiteral("日语识别模型 large-v2，也可使用 CPU。"), Qt::ToolTipRole);
+    m_recognitionEngine->setItemData(1, QStringLiteral("日语转录模型 whisper-ja-1.5B-ct2，也可使用 CPU。"), Qt::ToolTipRole);
+    m_chickenRiceAsr = stringSetting(m_settings, RecognitionEngineKey) == ChickenRiceKey;
+    m_recognitionEngine->setCurrentIndex(m_chickenRiceAsr ? 1 : 0);
+    recognitionForm->addRow(QStringLiteral("识别引擎"), m_recognitionEngine);
+    settingsLayout->addWidget(m_recognitionEngineRow);
     m_componentPages = new CurrentPageStack(m_settingsPage);
     m_componentPages->setObjectName(QStringLiteral("translateComponentPages"));
     auto *offlineSettings = new QWidget(m_componentPages);
@@ -580,7 +594,7 @@ ChickenRiceTranslateDialog::ChickenRiceTranslateDialog(
     m_computeMode->addItem(QStringLiteral("CPU"), aiSubtitleComputeModeKey(AiSubtitleComputeMode::Cpu));
     m_computeMode->setItemData(0, QStringLiteral("使用 int8_float16，保持低显存推理。"), Qt::ToolTipRole);
     m_computeMode->setItemData(1, QStringLiteral("使用官方高显存批处理模式，最大内部批量为 8。"), Qt::ToolTipRole);
-    m_computeMode->setItemData(2, QStringLiteral("主翻译模型使用 CPU/int8；引擎的 VAD 仍可能使用可用 GPU。"), Qt::ToolTipRole);
+    m_computeMode->setItemData(2, QStringLiteral("主模型使用 CPU/int8；引擎的 VAD 仍可能使用可用 GPU。"), Qt::ToolTipRole);
     auto *form = new QFormLayout;
     form->setFormAlignment(Qt::AlignTop);
     form->setRowWrapPolicy(QFormLayout::WrapLongRows);
@@ -694,6 +708,19 @@ ChickenRiceTranslateDialog::ChickenRiceTranslateDialog(
     m_dialogFrame = new DialogFrame(this, layout);
 
     connect(m_componentSettingsButton, &QPushButton::clicked, this, &ChickenRiceTranslateDialog::showComponentSettings);
+    connect(m_recognitionEngine, &QComboBox::currentIndexChanged, this, [this] {
+        if (!japaneseMode() || !modeSwitchAllowed()) {
+            const QSignalBlocker blocker(m_recognitionEngine);
+            m_recognitionEngine->setCurrentIndex(m_chickenRiceAsr ? 1 : 0);
+            return;
+        }
+        m_chickenRiceAsr = m_recognitionEngine->currentData() == ChickenRiceKey;
+        m_feedback.clear();
+        if (m_settings) m_settings->setValue(RecognitionEngineKey, m_recognitionEngine->currentData());
+        selectOfflineEngine();
+        if (m_pages->currentWidget() == m_settingsPage) showComponentSettings();
+        else updatePresentation();
+    });
     connect(m_modeCombo, &QComboBox::currentIndexChanged, this, &ChickenRiceTranslateDialog::changeGenerationMode);
     connect(backButton, &QPushButton::clicked, this, &ChickenRiceTranslateDialog::showGenerationPage);
     connect(m_pages, &QStackedWidget::currentChanged, this, [this] { refreshContentMinimum(); });
@@ -766,16 +793,16 @@ ChickenRiceTranslateDialog::ChickenRiceTranslateDialog(
         updatePresentation();
     });
     connect(m_service, &ChickenRiceTranslateService::progressChanged, this, [this](const auto &progress) {
-        if (m_batchMode == QStringLiteral("offline-direct")) applyProgress(progress);
+        if (m_queueRunning && !m_batchUsesFasterWhisper) applyProgress(progress);
     });
     connect(m_service, &ChickenRiceTranslateService::finished, this, [this](const auto &result) {
-        if (m_batchMode == QStringLiteral("offline-direct")) applyResult(result);
+        if (m_queueRunning && !m_batchUsesFasterWhisper) applyResult(result);
     });
     connect(m_service, &ChickenRiceTranslateService::shutdownFinished,
             this, &ChickenRiceTranslateDialog::finishShutdownIfReady);
     connect(m_service, &QObject::destroyed, this, [this] {
         m_service = nullptr;
-        if (!m_queueRunning || m_batchMode != QStringLiteral("offline-direct")) {
+        if (!m_queueRunning || m_batchUsesFasterWhisper) {
             updatePresentation(); finishShutdownIfReady(); return;
         }
         if (m_activeRow >= 0) {
@@ -797,7 +824,7 @@ ChickenRiceTranslateDialog::ChickenRiceTranslateDialog(
         cancelQueue();
     });
     if (componentPanel)
-        attachComponentPanel(componentPanel);
+        attachComponentPanel(componentPanel, ChickenRicePurpose::Translate);
     if (fasterWhisperPanel) attachFasterWhisperPanel(fasterWhisperPanel);
     if (m_transcribeService) ensureTranscribeService();
     restoreSettings();
@@ -820,9 +847,10 @@ ChickenRiceTranslateDialog::~ChickenRiceTranslateDialog()
         disconnect(m_translationSettingsPanel, nullptr, this, nullptr);
         m_translationSettingsPanel->shutdown();
     }
-    if (m_componentPanel) {
-        disconnect(m_componentPanel, nullptr, this, nullptr);
-        m_componentPanel->shutdown();
+    for (const auto &panel : m_componentPanels) {
+        if (!panel) continue;
+        disconnect(panel, nullptr, this, nullptr);
+        panel->shutdown();
     }
     if (m_fasterWhisperPanel) {
         disconnect(m_fasterWhisperPanel, nullptr, this, nullptr);
@@ -831,13 +859,13 @@ ChickenRiceTranslateDialog::~ChickenRiceTranslateDialog()
     if (m_transcribeService) {
         disconnect(m_transcribeService, nullptr, this, nullptr);
         if (m_ownsTranscribeService) m_transcribeService->shutdown();
-        else if (m_queueRunning && m_batchMode == QStringLiteral("offline-asr-ja")) m_transcribeService->cancel();
+        else if (m_queueRunning && m_batchUsesFasterWhisper) m_transcribeService->cancel();
     }
     if (m_service) {
         disconnect(m_service, nullptr, this, nullptr);
         if (m_ownsService)
             m_service->shutdown();
-        else if (m_queueRunning)
+        else if (m_queueRunning && !m_batchUsesFasterWhisper)
             m_service->cancel();
     }
 }
@@ -853,25 +881,39 @@ bool ChickenRiceTranslateDialog::taskEditingAllowed() const
 {
     return !m_shuttingDown && !m_queueHistoryLoading && m_queueHistoryWritable && !m_discovering && !translationBusy()
         && !(m_translationSettingsPanel && m_translationSettingsPanel->isBusy())
-        && !(m_componentPanel && m_componentPanel->installationBusy())
+        && !chickenRiceInstallationBusy()
         && !(m_fasterWhisperPanel && m_fasterWhisperPanel->installationBusy());
 }
 
-void ChickenRiceTranslateDialog::attachComponentPanel(GpuRecommendationDialog *panel)
+QPointer<GpuRecommendationDialog> &ChickenRiceTranslateDialog::chickenRicePanel(ChickenRicePurpose purpose)
 {
-    Q_ASSERT(panel && !m_componentPanel);
-    m_componentPanel = panel;
+    return m_componentPanels.at(purpose == ChickenRicePurpose::Transcribe ? 1 : 0);
+}
+
+bool ChickenRiceTranslateDialog::chickenRiceInstallationBusy() const
+{
+    return std::any_of(m_componentPanels.begin(), m_componentPanels.end(),
+        [](const auto &panel) { return panel && panel->installationBusy(); });
+}
+
+void ChickenRiceTranslateDialog::attachComponentPanel(GpuRecommendationDialog *panel, ChickenRicePurpose purpose)
+{
+    Q_ASSERT(panel && !chickenRicePanel(purpose));
+    chickenRicePanel(purpose) = panel;
     panel->setParent(m_componentContainer, Qt::Widget);
     m_componentLayout->addWidget(panel);
-    connect(panel, &GpuRecommendationDialog::engineReady, this, [this](const QString &path) {
+    connect(panel, &GpuRecommendationDialog::engineReady, this, [this, purpose](const QString &path) {
         const QString engine = normalizedPath(path);
         if (m_shuttingDown || engine.isEmpty())
             return;
-        m_engineDirectory->setText(engine);
-        scheduleEngineCheck();
+        if (purpose == m_chickenRicePurpose) {
+            m_engineDirectory->setText(engine);
+            scheduleEngineCheck();
+        }
         if (m_settings)
-            m_settings->setValue(Prefix + QStringLiteral("engineDirectory"), engine);
-        setModeFeedback(0, QStringLiteral("组件已准备好，返回生成页后点击“开始生成”。"));
+            m_settings->setValue(chickenRiceSettingsPrefix(purpose) + QStringLiteral("engineDirectory"), engine);
+        setModeFeedback(purpose == ChickenRicePurpose::Transcribe ? 1 : 0,
+            QStringLiteral("组件已准备好，返回生成页后点击“开始生成”。"));
         updatePresentation();
     });
     connect(panel, &GpuRecommendationDialog::activityChanged, this, [this] {
@@ -881,8 +923,9 @@ void ChickenRiceTranslateDialog::attachComponentPanel(GpuRecommendationDialog *p
     });
     connect(panel, &GpuRecommendationDialog::shutdownFinished,
             this, &ChickenRiceTranslateDialog::finishShutdownIfReady);
-    connect(panel, &QObject::destroyed, this, [this] {
-        m_componentPanel = nullptr;
+    connect(panel, &QObject::destroyed, this, [this, purpose] {
+        chickenRicePanel(purpose) = nullptr;
+        m_detectionStarted.at(purpose == ChickenRicePurpose::Transcribe ? 1 : 0) = false;
         updatePresentation();
         finishShutdownIfReady();
     });
@@ -893,14 +936,42 @@ void ChickenRiceTranslateDialog::attachComponentPanel(GpuRecommendationDialog *p
             refreshContentMinimum();
             QTimer::singleShot(0, this, &ChickenRiceTranslateDialog::refreshContentMinimum);
         });
-    panel->show();
+    panel->setVisible(purpose == m_chickenRicePurpose);
 }
 
 void ChickenRiceTranslateDialog::ensureComponentPanel()
 {
-    if (!m_componentPanel)
+    if (!chickenRicePanel(m_chickenRicePurpose))
         attachComponentPanel(new GpuRecommendationDialog(m_settings, m_componentContainer,
-            m_gpuProbe, nullptr, true));
+            m_gpuProbe, nullptr, true, m_chickenRicePurpose), m_chickenRicePurpose);
+}
+
+bool ChickenRiceTranslateDialog::useFasterWhisper() const
+{
+    return japaneseMode() && !m_chickenRiceAsr;
+}
+
+void ChickenRiceTranslateDialog::selectOfflineEngine()
+{
+    if (useFasterWhisper()) {
+        ensureFasterWhisperPanel();
+        ensureTranscribeService();
+        return;
+    }
+    if (subtitleTranslationMode()) return;
+    const auto purpose = japaneseMode() ? ChickenRicePurpose::Transcribe : ChickenRicePurpose::Translate;
+    if (purpose == m_chickenRicePurpose) return;
+    persistDraftSettings();
+    if (m_discoveryCancelled) m_discoveryCancelled->store(true);
+    m_discovering = false;
+    if (auto &panel = chickenRicePanel(m_chickenRicePurpose)) panel->hide();
+    m_chickenRicePurpose = purpose;
+    if (auto &panel = chickenRicePanel(purpose)) panel->show();
+    m_preferencesDirty = false;
+    m_loadingSettings = true;
+    restoreSettings();
+    m_loadingSettings = false;
+    scheduleEngineCheck();
 }
 
 void ChickenRiceTranslateDialog::ensureFasterWhisperPanel()
@@ -950,17 +1021,17 @@ void ChickenRiceTranslateDialog::ensureTranscribeService()
     }
     m_transcribeConnected = true;
     connect(m_transcribeService, &FasterWhisperTranscribeService::progressChanged, this, [this](const auto &progress) {
-        if (m_batchMode == QStringLiteral("offline-asr-ja")) applyProgress(progress);
+        if (m_queueRunning && m_batchUsesFasterWhisper) applyProgress(progress);
     });
     connect(m_transcribeService, &FasterWhisperTranscribeService::finished, this, [this](const auto &result) {
-        if (m_batchMode == QStringLiteral("offline-asr-ja")) applyResult(result);
+        if (m_queueRunning && m_batchUsesFasterWhisper) applyResult(result);
     });
     connect(m_transcribeService, &FasterWhisperTranscribeService::shutdownFinished,
             this, &ChickenRiceTranslateDialog::finishShutdownIfReady);
     connect(m_transcribeService, &QObject::destroyed, this, [this] {
         m_transcribeService = nullptr;
         m_transcribeConnected = false;
-        if (!m_queueRunning || m_batchMode != QStringLiteral("offline-asr-ja")) {
+        if (!m_queueRunning || !m_batchUsesFasterWhisper) {
             updatePresentation(); finishShutdownIfReady(); return;
         }
         if (m_activeRow >= 0) {
@@ -1091,10 +1162,7 @@ void ChickenRiceTranslateDialog::changeGenerationMode()
             m_table->selectRow(std::clamp(current.selectedRow, 0, static_cast<int>(m_items.size()) - 1));
         m_table->verticalScrollBar()->setValue(current.scrollValue);
     }
-    if (japaneseMode()) {
-        ensureFasterWhisperPanel();
-        ensureTranscribeService();
-    }
+    selectOfflineEngine();
     if (subtitleTranslationMode()) {
         m_subtitleTranslation->refreshSettings();
         m_pages->setCurrentWidget(m_generationPage);
@@ -1109,7 +1177,8 @@ bool ChickenRiceTranslateDialog::modeSwitchAllowed() const
         && !(m_translationSettingsPanel && m_translationSettingsPanel->isBusy())
         && !m_folderPicker && !m_audioPicker && !m_errorDialog
         && !(m_subtitleTranslation && m_subtitleTranslation->hasOpenDialog())
-        && !(m_componentPanel && (m_componentPanel->installationBusy() || m_componentPanel->hasOpenPicker()))
+        && std::none_of(m_componentPanels.begin(), m_componentPanels.end(),
+            [](const auto &panel) { return panel && (panel->installationBusy() || panel->hasOpenPicker()); })
         && !(m_fasterWhisperPanel && (m_fasterWhisperPanel->installationBusy() || m_fasterWhisperPanel->hasOpenPicker()));
 }
 
@@ -1128,7 +1197,7 @@ void ChickenRiceTranslateDialog::showComponentSettings()
         if (translationBusy()) return;
         ensureTranslationSettingsPanel();
         m_componentPages->setCurrentWidget(m_translationSettingsPanel);
-    } else if (japaneseMode()) {
+    } else if (useFasterWhisper()) {
         ensureFasterWhisperPanel();
         m_componentPages->setCurrentIndex(1);
     } else {
@@ -1138,12 +1207,9 @@ void ChickenRiceTranslateDialog::showComponentSettings()
     m_pages->setCurrentWidget(m_settingsPage);
     updatePresentation();
     refreshContentMinimum();
-    if (!subtitleTranslationMode() && !japaneseMode() && !m_componentDetectionStarted) {
-        m_componentDetectionStarted = true;
-        QPointer<ChickenRiceTranslateDialog> guard(this);
-        m_componentPanel->startDetection();
-        if (!guard)
-            return;
+    if (!subtitleTranslationMode() && !useFasterWhisper()) {
+        auto &started = m_detectionStarted.at(m_chickenRicePurpose == ChickenRicePurpose::Transcribe ? 1 : 0);
+        if (!std::exchange(started, true)) chickenRicePanel(m_chickenRicePurpose)->startDetection();
     }
 }
 
@@ -1207,14 +1273,17 @@ void ChickenRiceTranslateDialog::resizeEvent(QResizeEvent *event)
 
 void ChickenRiceTranslateDialog::restoreSettings()
 {
-    m_engineDirectory->setText(normalizedPath(stringSetting(m_settings, QStringLiteral("engineDirectory"))));
-    const QString compute = stringSetting(m_settings, QStringLiteral("computeMode"));
+    const auto prefix = chickenRiceSettingsPrefix(m_chickenRicePurpose);
+    m_engineDirectory->setText(normalizedPath(stringSetting(m_settings, prefix + QStringLiteral("engineDirectory"))));
+    const QString compute = stringSetting(m_settings, prefix + QStringLiteral("computeMode"));
     const auto mode = aiSubtitleComputeModeFromKey(compute).value_or(AiSubtitleComputeMode::GpuLowMemory);
     m_computeMode->setCurrentIndex(qMax(0, m_computeMode->findData(aiSubtitleComputeModeKey(mode))));
     restoreGenerationOptions();
     if (m_engineDirectory->text().isEmpty()) {
-        const QString root = normalizedPath(stringSetting(m_settings, QStringLiteral("installRoot")));
-        discoverInstalledEngine(root.isEmpty() ? defaultRoot() : root);
+        const QString root = normalizedPath(stringSetting(m_settings, prefix + QStringLiteral("installRoot")));
+        discoverInstalledEngine(root.isEmpty()
+            ? QDir(QStandardPaths::writableLocation(QStandardPaths::AppLocalDataLocation)).filePath(prefix)
+            : root);
     }
 }
 
@@ -1426,7 +1495,7 @@ void ChickenRiceTranslateDialog::restoreGenerationOptions()
 {
     ChickenRiceGenerationOptions options;
     if (m_settings) {
-        const QVariant saved = m_settings->value(GenerationSettingsKey);
+        const QVariant saved = m_settings->value(chickenRiceSettingsPrefix(m_chickenRicePurpose) + QStringLiteral("generationOptions"));
         if (saved.metaType().id() == QMetaType::QString && saved.toString().size() <= 4096) {
             const auto document = QJsonDocument::fromJson(saved.toString().toUtf8());
             const auto object = document.object();
@@ -1505,7 +1574,8 @@ void ChickenRiceTranslateDialog::persistGenerationOptions()
         {QStringLiteral("minSilenceDurationMs"), options.minSilenceDurationMs},
         {QStringLiteral("speechPadMs"), options.speechPadMs},
         {QStringLiteral("mergeSegments"), options.mergeSegments}};
-    m_settings->setValue(GenerationSettingsKey, QString::fromUtf8(QJsonDocument(object).toJson(QJsonDocument::Compact)));
+    m_settings->setValue(chickenRiceSettingsPrefix(m_chickenRicePurpose) + QStringLiteral("generationOptions"),
+        QString::fromUtf8(QJsonDocument(object).toJson(QJsonDocument::Compact)));
     m_settings->sync();
     m_generationSaveStatus->setText(m_settings->status() == QSettings::NoError ? QString()
         : QStringLiteral("生成参数保存失败，请检查设置存储位置。"));
@@ -1515,27 +1585,36 @@ void ChickenRiceTranslateDialog::persistGenerationOptions()
 void ChickenRiceTranslateDialog::discoverInstalledEngine(const QString &root)
 {
     m_discovering = true;
+    ++m_discoveryWorkers;
     m_discoveryCancelled = std::make_shared<std::atomic_bool>(false);
     const auto cancelled = m_discoveryCancelled;
     auto promise = std::make_shared<QPromise<QString>>();
     auto *watcher = new QFutureWatcher<QString>(this);
-    connect(watcher, &QFutureWatcher<QString>::finished, this, [this, watcher] {
+    const auto purpose = m_chickenRicePurpose;
+    connect(watcher, &QFutureWatcher<QString>::finished, this, [this, watcher, cancelled, purpose] {
         const QString candidate = watcher->result();
         watcher->deleteLater();
+        --m_discoveryWorkers;
+        if (m_discoveryCancelled != cancelled || cancelled->load()) {
+            if (m_discoveryCancelled == cancelled) m_discovering = false;
+            finishShutdownIfReady();
+            return;
+        }
         m_discovering = false;
         if (!m_shuttingDown && m_engineDirectory->text().trimmed().isEmpty()) {
             m_loadingSettings = true;
             m_engineDirectory->setText(candidate);
             m_loadingSettings = false;
             scheduleEngineCheck();
-            if (candidate.isEmpty())
-                setModeFeedback(0, QStringLiteral("请浏览选择已安装的引擎目录；有多个安装版本时需手动选择。"));
+            if (candidate.isEmpty() && (purpose == ChickenRicePurpose::Translate || m_chickenRiceAsr))
+                setModeFeedback(purpose == ChickenRicePurpose::Transcribe ? 1 : 0,
+                    QStringLiteral("请浏览选择已安装的引擎目录；有多个安装版本时需手动选择。"));
         }
         updatePresentation();
         finishShutdownIfReady();
     });
     watcher->setFuture(promise->future());
-    QThreadPool::globalInstance()->start([root, cancelled, promise] {
+    QThreadPool::globalInstance()->start([root, cancelled, promise, purpose] {
         promise->start();
         QString candidate;
         const QRegularExpression fingerprint(QStringLiteral("^[0-9a-fA-F]{64}$"));
@@ -1547,7 +1626,9 @@ void ChickenRiceTranslateDialog::discoverInstalledEngine(const QString &root)
             if (QFileInfo(marker).isSymLink() || !marker.open(QIODevice::ReadOnly) || marker.size() > 16384)
                 continue;
             const auto record = QJsonDocument::fromJson(marker.readAll()).object();
+            const QString installedPurpose = record.value(QStringLiteral("purpose")).toString(QStringLiteral("translate"));
             if (record.value(QStringLiteral("owner")).toString() != QStringLiteral("Arcanblade.ChickenRice.Install.v1")
+                || installedPurpose != (purpose == ChickenRicePurpose::Transcribe ? QStringLiteral("transcribe") : QStringLiteral("translate"))
                 || !fingerprint.match(record.value(QStringLiteral("fingerprint")).toString()).hasMatch())
                 continue;
             if (!candidate.isEmpty()) {
@@ -1565,8 +1646,9 @@ void ChickenRiceTranslateDialog::persistSettings()
 {
     if (!m_settings)
         return;
-    m_settings->setValue(Prefix + QStringLiteral("engineDirectory"), m_frozenRequest.engineDirectory);
-    m_settings->setValue(Prefix + QStringLiteral("computeMode"),
+    const auto prefix = chickenRiceSettingsPrefix(m_frozenRequest.purpose);
+    m_settings->setValue(prefix + QStringLiteral("engineDirectory"), m_frozenRequest.engineDirectory);
+    m_settings->setValue(prefix + QStringLiteral("computeMode"),
         aiSubtitleComputeModeKey(m_frozenRequest.computeMode));
 }
 
@@ -1575,9 +1657,10 @@ void ChickenRiceTranslateDialog::persistDraftSettings()
     if (!m_preferencesDirty || !m_settings || !taskEditingAllowed())
         return;
     const QString engine = normalizedPath(m_engineDirectory->text());
-    if (!engine.isEmpty())
-        m_settings->setValue(Prefix + QStringLiteral("engineDirectory"), engine);
-    m_settings->setValue(Prefix + QStringLiteral("computeMode"), m_computeMode->currentData().toString());
+    const auto prefix = chickenRiceSettingsPrefix(m_chickenRicePurpose);
+    if (!engine.isEmpty() || m_engineDirectory->text().trimmed().isEmpty())
+        m_settings->setValue(prefix + QStringLiteral("engineDirectory"), engine);
+    m_settings->setValue(prefix + QStringLiteral("computeMode"), m_computeMode->currentData().toString());
     m_preferencesDirty = false;
 }
 
@@ -1676,9 +1759,10 @@ void ChickenRiceTranslateDialog::setCurrentAudioPath(const QString &path)
 
 bool ChickenRiceTranslateDialog::isBusy() const
 {
-    return m_discovering || m_checkingEngine || m_validationWorkers > 0
+    return m_discoveryWorkers > 0 || m_checkingEngine || m_validationWorkers > 0
         || m_queueHistoryWorkers > 0 || m_queueHistoryTimer->isActive()
-        || translationBusy() || (m_componentPanel && m_componentPanel->isBusy())
+        || translationBusy() || std::any_of(m_componentPanels.begin(), m_componentPanels.end(),
+            [](const auto &panel) { return panel && panel->isBusy(); })
         || (m_fasterWhisperPanel && m_fasterWhisperPanel->isBusy())
         || (m_translationSettingsPanel && m_translationSettingsPanel->isBusy());
 }
@@ -1736,19 +1820,20 @@ void ChickenRiceTranslateDialog::startQueue(bool retry)
 {
     if (!taskEditingAllowed()) return;
     const bool japanese = japaneseMode();
-    if (japanese) { ensureFasterWhisperPanel(); ensureTranscribeService(); }
-    const QString engine = japanese ? m_fasterWhisperPanel->checkedEngineDirectory()
+    const bool xxl = useFasterWhisper();
+    if (xxl) { ensureFasterWhisperPanel(); ensureTranscribeService(); }
+    const QString engine = xxl ? m_fasterWhisperPanel->checkedEngineDirectory()
         : normalizedPath(m_engineDirectory->text());
-    const bool ready = japanese ? m_fasterWhisperPanel->isReady()
+    const bool ready = xxl ? m_fasterWhisperPanel->isReady()
         : !m_checkingEngine && samePath(engine, m_validatedEngineDirectory);
-    if (!ready || (japanese ? !m_transcribeService : !m_service)) {
+    if (!ready || (xxl ? !m_transcribeService : !m_service)) {
         m_feedback = QStringLiteral("请先选择并检查有效的组件及模型。");
         updatePresentation();
         return;
     }
     const auto options = generationOptions();
-    const auto asrOptions = japanese ? m_fasterWhisperPanel->generationOptions() : FasterWhisperGenerationOptions{};
-    const QString optionsError = japanese ? validateFasterWhisperGenerationOptions(asrOptions)
+    const auto asrOptions = xxl ? m_fasterWhisperPanel->generationOptions() : FasterWhisperGenerationOptions{};
+    const QString optionsError = xxl ? validateFasterWhisperGenerationOptions(asrOptions)
         : validateChickenRiceGenerationOptions(options);
     if (!optionsError.isEmpty()) {
         m_feedback = QStringLiteral("生成参数无效：%1").arg(optionsError);
@@ -1788,8 +1873,9 @@ void ChickenRiceTranslateDialog::startQueue(bool retry)
                 item.taskId.toUtf8(), QCryptographicHash::Sha256).toHex().left(16));
     }
     m_batchMode = m_modeCombo->currentData().toString();
+    m_batchUsesFasterWhisper = xxl;
     const QString jobs = QStandardPaths::writableLocation(QStandardPaths::AppLocalDataLocation);
-    if (japanese) {
+    if (xxl) {
         m_frozenTranscribeRequest = {};
         m_frozenTranscribeRequest.engineDirectory = engine;
         m_frozenTranscribeRequest.modelDirectory = m_fasterWhisperPanel->checkedModelDirectory();
@@ -1798,8 +1884,10 @@ void ChickenRiceTranslateDialog::startQueue(bool retry)
         m_frozenTranscribeRequest.generationOptions = asrOptions;
     } else {
         m_frozenRequest = {};
+        m_frozenRequest.purpose = m_chickenRicePurpose;
         m_frozenRequest.engineDirectory = engine;
-        m_frozenRequest.outputRoot = QDir(jobs).filePath(QStringLiteral("Ai/ChickenRiceJobs"));
+        m_frozenRequest.outputRoot = QDir(jobs).filePath(japanese ? QStringLiteral("Ai/ChickenRiceAsrJobs")
+                                                                 : QStringLiteral("Ai/ChickenRiceJobs"));
         m_frozenRequest.computeMode = aiSubtitleComputeModeFromKey(m_computeMode->currentData().toString())
             .value_or(ChickenRiceComputeMode::GpuLowMemory);
         m_frozenRequest.generationOptions = options;
@@ -1825,8 +1913,7 @@ void ChickenRiceTranslateDialog::startNext()
     // A queued continuation from a cancelled batch may arrive after a retry
     // has already started. Never replace the identity of an active request.
     if (!m_queueRunning || m_activeRow >= 0) return;
-    const bool japanese = m_batchMode == QStringLiteral("offline-asr-ja");
-    if (m_cancelRequested || m_shuttingDown || (japanese ? !m_transcribeService : !m_service)) {
+    if (m_cancelRequested || m_shuttingDown || (m_batchUsesFasterWhisper ? !m_transcribeService : !m_service)) {
         settleBatch();
         return;
     }
@@ -1845,7 +1932,8 @@ void ChickenRiceTranslateDialog::startNext()
         {QStringLiteral("mode"),m_batchMode},{QStringLiteral("audioPath"),item.audioPath},
         {QStringLiteral("libraryRoot"),item.libraryRoot},{QStringLiteral("libraryRelativePath"),item.libraryRelativePath},
         {QStringLiteral("outputBatchId"),item.outputBatchId},{QStringLiteral("outputFileSuffix"),item.outputFileSuffix}};
-    if (japanese) {
+    parameters.insert(QStringLiteral("engine"), m_batchUsesFasterWhisper ? FasterWhisperKey : ChickenRiceKey);
+    if (m_batchUsesFasterWhisper) {
         parameters.insert(QStringLiteral("engineDirectory"),m_frozenTranscribeRequest.engineDirectory);
         parameters.insert(QStringLiteral("modelDirectory"),m_frozenTranscribeRequest.modelDirectory);
         parameters.insert(QStringLiteral("outputRoot"),m_frozenTranscribeRequest.outputRoot);
@@ -1880,9 +1968,8 @@ void ChickenRiceTranslateDialog::launchActiveTask()
         AiSubtitleTaskResult result; result.audioPath=item.audioPath; result.state=State::Cancelled;
         applyResult(result); return;
     }
-    const bool japanese=m_batchMode==QStringLiteral("offline-asr-ja");
     bool accepted = false;
-    if (japanese) {
+    if (m_batchUsesFasterWhisper) {
         auto request = m_frozenTranscribeRequest;
         request.audioPath = item.audioPath;
         request.libraryRoot = item.libraryRoot;
@@ -2047,11 +2134,13 @@ void ChickenRiceTranslateDialog::updateProgressFeedback()
 void ChickenRiceTranslateDialog::updatePresentation()
 {
     const bool generating = translationBusy();
-    const bool installing = m_componentPanel && m_componentPanel->installationBusy();
+    const bool installing = chickenRiceInstallationBusy();
     const bool editable = taskEditingAllowed() && !m_folderPicker && !m_audioPicker;
     m_engineDirectory->setEnabled(editable);
     m_computeMode->setEnabled(editable);
     m_modeCombo->setEnabled(modeSwitchAllowed());
+    m_recognitionEngineRow->setVisible(japaneseMode());
+    m_recognitionEngine->setEnabled(modeSwitchAllowed());
     m_generationParameters->setEnabled(editable);
     const auto preset = chickenRiceGenerationPresetFromKey(m_generationPreset->currentData().toString());
     m_customGenerationParameters->setVisible(preset == ChickenRiceGenerationPreset::Custom);
@@ -2073,7 +2162,8 @@ void ChickenRiceTranslateDialog::updatePresentation()
     if (m_translationSettingsPanel) m_translationSettingsPanel->setEnabled(!m_shuttingDown && !generating);
     m_subtitleTranslation->setEnabled(!m_shuttingDown
         && !(m_translationSettingsPanel && m_translationSettingsPanel->isBusy()));
-    if (m_componentPanel) m_componentPanel->setEnabled(!m_shuttingDown && !generating && !preparingWhisper);
+    for (const auto &panel : m_componentPanels)
+        if (panel) panel->setEnabled(!m_shuttingDown && !generating && !preparingWhisper);
     if (m_fasterWhisperPanel) m_fasterWhisperPanel->setEnabled(!m_shuttingDown && !generating && !installing);
     const QString engine = normalizedPath(m_engineDirectory->text());
     const bool checked = !m_checkingEngine && samePath(engine, m_validatedEngineDirectory);
@@ -2092,19 +2182,20 @@ void ChickenRiceTranslateDialog::updatePresentation()
     m_settingsComponentStatus->setProperty("validationState", offlineCheckState);
     updateStatusIcon(m_settingsComponentStatusIcon, offlineCheckState);
     const bool japanese = japaneseMode();
-    const bool generationReady = japanese ? m_fasterWhisperPanel && m_fasterWhisperPanel->isReady() : checked;
-    const bool generationService = japanese ? bool(m_transcribeService) : bool(m_service);
-    const QString checkState = japanese
+    const bool xxl = useFasterWhisper();
+    const bool generationReady = xxl ? m_fasterWhisperPanel && m_fasterWhisperPanel->isReady() : checked;
+    const bool generationService = xxl ? bool(m_transcribeService) : bool(m_service);
+    const QString checkState = xxl
         ? m_fasterWhisperPanel ? m_fasterWhisperPanel->validationState() : QStringLiteral("unselected")
         : offlineCheckState;
-    m_componentStatus->setText(japanese ? m_fasterWhisperPanel ? m_fasterWhisperPanel->statusText()
+    m_componentStatus->setText(xxl ? m_fasterWhisperPanel ? m_fasterWhisperPanel->statusText()
         : QStringLiteral("请选择组件目录") : offlineStatus);
-    m_componentStatus->setToolTip(japanese && m_fasterWhisperPanel
+    m_componentStatus->setToolTip(xxl && m_fasterWhisperPanel
         ? m_fasterWhisperPanel->checkedEngineDirectory() + QLatin1Char('\n') + m_fasterWhisperPanel->checkedModelDirectory()
         : offlineTooltip);
     m_componentStatus->setProperty("validationState", checkState);
     updateStatusIcon(m_componentStatusIcon, checkState);
-    m_introduction->setText(japanese ? QStringLiteral("日语音频 → 日语字幕 · 完全离线")
+    m_introduction->setText(japanese ? QStringLiteral("日语音频 → 日语字幕 · %1").arg(m_recognitionEngine->currentText())
         : QStringLiteral("日语音频 → 中文字幕 · 完全离线"));
     m_modeConfiguration->currentWidget()->setProperty("modeId", m_modeCombo->currentData());
     int succeeded = 0, failed = 0, cancelled = 0, pending = 0;
@@ -2253,6 +2344,7 @@ void ChickenRiceTranslateDialog::startEngineCheck()
     m_validationCancelled = std::make_shared<std::atomic_bool>(false);
     const auto cancelled = m_validationCancelled;
     const auto validator = m_validator;
+    const auto purpose = m_chickenRicePurpose;
     ++m_validationWorkers;
     auto promise = std::make_shared<QPromise<QString>>();
     auto *watcher = new QFutureWatcher<QString>(this);
@@ -2270,13 +2362,13 @@ void ChickenRiceTranslateDialog::startEngineCheck()
         finishShutdownIfReady();
     });
     watcher->setFuture(promise->future());
-    QThreadPool::globalInstance()->start([promise, engine, cancelled, validator] {
+    QThreadPool::globalInstance()->start([promise, engine, cancelled, validator, purpose] {
         promise->start();
         QString error;
         try {
             if (!cancelled->load()) {
                 if (validator) error = validator(engine, *cancelled);
-                else if (validateChickenRiceEngine(engine, &error)) {
+                else if (validateChickenRiceEngine(engine, &error, purpose)) {
                     const QString configPath = QDir(engine).filePath(QStringLiteral("generation_config.json5"));
                     QFile config(configPath);
                     if (QFileInfo(configPath).isSymLink() || !config.open(QIODevice::ReadOnly)
@@ -2341,10 +2433,10 @@ void ChickenRiceTranslateDialog::shutdown()
             m_transcribeService->shutdown();
         if (!guard)
             return;
-        if (m_componentPanel)
-            m_componentPanel->shutdown();
-        if (!guard)
-            return;
+        for (const auto &panel : m_componentPanels) {
+            if (panel) panel->shutdown();
+            if (!guard) return;
+        }
         if (m_fasterWhisperPanel)
             m_fasterWhisperPanel->shutdown();
         if (!guard)
@@ -2379,11 +2471,11 @@ void ChickenRiceTranslateDialog::showEvent(QShowEvent *event)
     showGenerationPage();
     QDialog::showEvent(event);
     if (!translationBusy()) {
-        if (japaneseMode()) {
+        if (useFasterWhisper()) {
             const bool alreadyStarted = m_fasterWhisperCheckStarted;
             ensureFasterWhisperPanel();
             if (alreadyStarted && !m_fasterWhisperPanel->isBusy()) m_fasterWhisperPanel->recheck();
-        } else if (!subtitleTranslationMode() && !(m_componentPanel && m_componentPanel->installationBusy()) && !m_checkingEngine) {
+        } else if (!subtitleTranslationMode() && !chickenRiceInstallationBusy() && !m_checkingEngine) {
             scheduleEngineCheck();
         }
     }

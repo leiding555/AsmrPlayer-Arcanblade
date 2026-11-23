@@ -1,4 +1,5 @@
 #include "playback/LibrarySubtitleResolver.h"
+#include "library/SubtitleMatcher.h"
 
 #include <QDir>
 #include <QFile>
@@ -186,12 +187,13 @@ LibrarySubtitleResolution resolveLibrarySubtitles(const QString &databasePath,
         result.snapshot.success = false;
         result.snapshot.diagnostics += closed.diagnostics;
     }
-    auto selected = selectLibrarySubtitles(std::move(result.snapshot));
+    auto selected = selectLibrarySubtitles(databasePath, std::move(result.snapshot));
     selected.pruned = result.pruned;
     return selected;
 }
 
-LibrarySubtitleResolution selectLibrarySubtitles(LibraryTrackSubtitlesResult snapshotResult)
+namespace {
+LibrarySubtitleResolution selectBoundSubtitles(LibraryTrackSubtitlesResult snapshotResult)
 {
     LibrarySubtitleResolution result;
     result.snapshot = std::move(snapshotResult);
@@ -242,6 +244,15 @@ LibrarySubtitleResolution selectLibrarySubtitles(LibraryTrackSubtitlesResult sna
     if (!available.isEmpty()) {
         result.selectedFile = available.first().second;
         result.decision = LibrarySubtitleDecision::Selected;
+        if (snapshot.preference.state == SubtitlePreferenceState::Unset) {
+            const auto usable = std::find_if(available.cbegin(), available.cend(), [&](const auto &entry) {
+                return loadLibrarySubtitle(snapshot.work.rootPath, entry.second).succeeded();
+            });
+            if (usable != available.cend())
+                result.selectedFile = usable->second;
+            else
+                result.decision = LibrarySubtitleDecision::NoAvailable;
+        }
     } else if (snapshot.preference.state == SubtitlePreferenceState::Subtitle) {
         result.decision = LibrarySubtitleDecision::Error;
         if (result.issues.isEmpty())
@@ -249,6 +260,59 @@ LibrarySubtitleResolution selectLibrarySubtitles(LibraryTrackSubtitlesResult sna
                 snapshot.preference.subtitleFileId, {}, QStringLiteral("首选字幕没有有效绑定。")});
     } else
         result.decision = LibrarySubtitleDecision::NoAvailable;
+    return result;
+}
+
+qint64 firstUsableRecommendation(const LibraryTrackSubtitlesResult &snapshot)
+{
+    QHash<qint64, const LibraryFile *> subtitles;
+    for (const auto &file : snapshot.files)
+        if (file.type == LibraryFileType::Subtitle && !file.missing)
+            subtitles.insert(file.id, &file);
+    for (const auto &binding : snapshot.bindings)
+        subtitles.remove(binding.subtitleFileId);
+    if (subtitles.isEmpty())
+        return 0;
+
+    const auto ranked = SubtitleMatcher::rankedRecommendations(snapshot.work, snapshot.files, snapshot.audio.id);
+    for (const auto id : ranked) {
+        const auto *file = subtitles.value(id);
+        if (file && loadLibrarySubtitle(snapshot.work.rootPath, *file).succeeded())
+            return id;
+    }
+    return 0;
+}
+}
+
+LibrarySubtitleResolution selectLibrarySubtitles(const QString &databasePath, LibraryTrackSubtitlesResult snapshot)
+{
+    auto result = selectBoundSubtitles(std::move(snapshot));
+    LibraryRepository writer(databasePath, LibraryRepository::Access::ReadWriteExisting);
+    // Retry a superseded snapshot once, recomputing the recommendation under the new settings.
+    for (int attempt = 0; attempt < 2 && result.decision == LibrarySubtitleDecision::NoAvailable; ++attempt) {
+        const auto subtitleId = firstUsableRecommendation(result.snapshot);
+        if (!subtitleId) break;
+        auto saved = writer.open();
+        if (saved.success)
+            saved = writer.bindRecommendedSubtitle(result.snapshot, subtitleId);
+        const bool stale = std::any_of(saved.diagnostics.cbegin(), saved.diagnostics.cend(), [](const auto &issue) {
+            return issue.code == LibraryDiagnosticCode::StaleWorkSnapshot;
+        });
+        if (!saved.success && !stale) {
+            result.snapshot.success = false;
+            result.snapshot.diagnostics = saved.diagnostics;
+            return selectBoundSubtitles(std::move(result.snapshot));
+        }
+        result = selectBoundSubtitles(writer.trackSubtitles(result.snapshot.work.id, result.snapshot.audio.id));
+        if (saved.success) {
+            result.boundRecommendation = true;
+            break;
+        }
+    }
+    // If all bindings failed to parse and there was no usable replacement,
+    // let the normal loader report the highest-ranked binding's error.
+    if (result.decision == LibrarySubtitleDecision::NoAvailable && result.selectedFile.id > 0)
+        result.decision = LibrarySubtitleDecision::Selected;
     return result;
 }
 

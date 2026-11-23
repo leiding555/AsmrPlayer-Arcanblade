@@ -138,10 +138,18 @@ QString chickenRiceVariantDisplayName(ChickenRiceVariant variant)
     return {};
 }
 
-QString chickenRiceArchiveName(ChickenRiceVariant variant)
+QString chickenRiceArchiveName(ChickenRiceVariant variant, ChickenRicePurpose purpose)
 {
     const auto key = chickenRiceVariantKey(variant);
-    return key.isEmpty() ? QString() : QStringLiteral("faster_whisper_transwithai_windows_%1-translate.zip").arg(key);
+    if (key.isEmpty())
+        return {};
+    switch (purpose) {
+    case ChickenRicePurpose::Translate:
+        return QStringLiteral("faster_whisper_transwithai_windows_%1-translate.zip").arg(key);
+    case ChickenRicePurpose::Transcribe:
+        return QStringLiteral("faster_whisper_transwithai_windows_%1-transcribe.zip").arg(key);
+    }
+    return {};
 }
 
 std::optional<ChickenRiceVariant> chickenRiceVariantFromKey(const QString &key)

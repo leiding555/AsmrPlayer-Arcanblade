@@ -34,7 +34,7 @@ public:
     // The owner supplies its sidebar bounds mapped into this bar. Only the
     // horizontal span is used; window controls keep their native-sized slots.
     void setBrandAlignmentRect(const QRect &rect);
-    // Horizontal center of the sidebar import icon, mapped into this bar.
+    // Horizontal center of the sidebar favorites icon, mapped into this bar.
     void setBrandIconCenterX(int logicalX);
     void setMaximized(bool maximized);
     void setWindowActive(bool active);

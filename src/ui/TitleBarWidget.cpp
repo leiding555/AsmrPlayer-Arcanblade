@@ -210,7 +210,7 @@ void TitleBarWidget::updateBrandGeometry()
     const QString caption = m_closing ? m_titleText + QStringLiteral(" · 正在关闭") : m_titleText;
     // Anchor the actual 28px icon, moving its caption by the same amount. The
     // fallback is only for standalone title bars; owners supply their styled
-    // import icon's actual position, including compact-sidebar layout changes.
+    // favorites icon's actual position, including compact-sidebar layout changes.
     const int iconCenterX = m_brandIconCenterX >= 0 ? m_brandIconCenterX : span.x() + 40;
     const int iconX = qBound(span.x(), iconCenterX - BrandIconSize / 2,
                             qMax(span.x(), span.x() + span.width() - BrandIconSize));

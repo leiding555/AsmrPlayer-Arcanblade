@@ -59,6 +59,19 @@ const offlineStore = (() => {
     await index("readwrite", store => store.delete(record.id));
   }
 
+  async function removeWorks(records) {
+    return navigator.locks.request(name, async () => {
+      for (const record of records) {
+        try {
+          await remove(record);
+        } catch {
+          // Continue with other tracks. The index retains failed entries for retry.
+        }
+      }
+      return index("readonly", store => store.getAll());
+    });
+  }
+
   function writeAudio(source, file, size, signal) {
     signal.throwIfAborted();
     return new Promise((resolve, reject) => {
@@ -87,6 +100,7 @@ const offlineStore = (() => {
     try {
       const previous = await index("readonly", store => store.get(record.id));
       if (!record.workFolderName && previous?.workFolderName) record.workFolderName = previous.workFolderName;
+      record.directory ??= previous?.directory;
       if (previous?.crc === record.crc && previous.size === record.size
           && previous.mime === source.mime) source.previous = await getFile(previous).catch(() => null);
       if (!source.previous) {
@@ -100,7 +114,8 @@ const offlineStore = (() => {
         if (JSON.stringify(previous.subtitles) === JSON.stringify(record.subtitles)
             && previous.coverCrc === record.coverCrc && previous.workName === record.workName
             && (previous.workFolderName || "") === record.workFolderName
-            && previous.trackName === record.trackName && previous.order === record.order) return "skipped";
+            && previous.directory === record.directory && previous.trackName === record.trackName
+            && previous.order === record.order) return "skipped";
         await index("readwrite", store => store.put({ ...record, mime: previous.mime, file: previous.file }));
         return "updated";
       }
@@ -116,7 +131,7 @@ const offlineStore = (() => {
   }
 
   return {
-    available, getFile,
+    available, getFile, removeWorks,
     remove: record => navigator.locks.request(name, () => remove(record)),
     async importPackage(pack, signal, progress) {
       return navigator.locks.request(name, { signal }, async () => {
@@ -124,7 +139,7 @@ const offlineStore = (() => {
           signal.throwIfAborted();
           const subtitles = await pack.readSubtitles(track.subtitles);
           const outcome = await save({ id: `${pack.workId}/${track.id}`, workId: pack.workId, workName: pack.workName,
-            workFolderName: pack.workFolderName, trackName: track.name, order: track.order,
+            workFolderName: pack.workFolderName, trackName: track.name, directory: track.directory, order: track.order,
             size: track.entry.size, crc: track.entry.crc,
             subtitles, cover: pack.cover, coverCrc: pack.coverCrc },
           { blob: track.entry.blob, expectedCrc: track.entry.crc, mime: track.mime }, signal);

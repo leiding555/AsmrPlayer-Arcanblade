@@ -81,6 +81,7 @@
       </form>
       <p id="package-help" hidden>下载完成后，从离线库的「导入离线包」选择下载的文件。</p>
       <a id="hosted-library" href="https://leiding555.github.io/Arcanblade-offline/" target="_blank" rel="noopener noreferrer" hidden>打开离线库</a>
+      <nav id="work-breadcrumb" class="work-breadcrumb" aria-label="作品目录" hidden></nav>
       <ul id="tracks"></ul>
     </section>
     <section id="offline" hidden>
@@ -92,6 +93,7 @@
             <input id="pack-files" type="file" multiple accept=".zip,application/zip">
           </label>
           <button id="cancel-import" type="button" hidden>取消导入</button>
+          <button id="offline-manage" type="button" aria-controls="offline-works offline-management-bar" aria-expanded="false" hidden>管理</button>
         </div>
       </div>
       <div class="work-search" id="offline-search-box" hidden>
@@ -108,8 +110,14 @@
       </section>
       <p id="import-status" role="status"></p>
       <p id="offline-usage"></p>
+      <p id="offline-management-status" role="status" hidden></p>
       <div id="offline-works"></div>
+      <nav id="offline-breadcrumb" class="work-breadcrumb" aria-label="作品目录" hidden></nav>
       <ul id="offline-tracks"></ul>
+      <div id="offline-management-bar" role="group" aria-label="管理离线作品" hidden>
+        <button id="offline-select-all" type="button" aria-controls="offline-works">全选</button>
+        <button id="offline-delete-selected" type="button" disabled>删除所选（0 部）</button>
+      </div>
     </section>
     <section id="player" hidden>
       <div class="now-playing">
@@ -127,16 +135,23 @@
             <button id="resume-subtitles" type="button" hidden>回到当前字幕</button>
           </div>
         </div>
+        <div class="subtitle-pip-feedback">
+          <p id="subtitle-pip-status" role="status"></p>
+          <details id="subtitle-pip-diagnostics">
+            <summary>画中画检测详情</summary>
+            <p id="subtitle-pip-report"></p>
+          </details>
+        </div>
         <div id="subtitle-scroll" tabindex="0" role="region" aria-labelledby="subtitle-heading">
           <ol id="subtitle-cues"></ol>
         </div>
       </section>
       <footer class="player-controls">
-        <p id="subtitle-pip-status" role="status"></p>
         <p id="playback-status" role="status"></p>
         <audio id="audio" controls preload="metadata"></audio>
         <div class="track-controls">
           <button id="previous" type="button">上一首</button>
+          <button id="playback-mode" type="button" aria-label="顺序播放，切换为单曲循环">顺序播放</button>
           <button id="next" type="button">下一首</button>
         </div>
       </footer>

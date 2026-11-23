@@ -5,7 +5,10 @@
 #include "artwork/WorkCoverService.h"
 #include "ui/LibraryTrackTreeModel.h"
 
+#include <QElapsedTimer>
 #include <QHash>
+#include <QPersistentModelIndex>
+#include <QPointer>
 #include <QSet>
 #include <QString>
 #include <QStringList>
@@ -21,6 +24,8 @@ class QLineEdit;
 class QModelIndex;
 class QListView;
 class QMenu;
+class QMessageBox;
+class QMouseEvent;
 class QPushButton;
 class QStackedWidget;
 class QSplitter;
@@ -34,6 +39,7 @@ namespace asmr {
 
 class LibraryWorksModel;
 class LibraryWorksFilterModel;
+class FavoriteTracksView;
 class CoverArtWidget;
 struct CoverArtResult;
 
@@ -64,6 +70,8 @@ public:
                     const QSet<qint64> &subtitleAudioFileIds = {});
     void setCategories(const QVector<WorkCategory> &categories,
                        const QVector<WorkCategoryMembership> &memberships);
+    void setFavoriteTracks(const QVector<LibraryFavoriteTrack> &tracks);
+    [[nodiscard]] bool showingFavorites() const;
     void setCategoryCover(qint64 categoryId, quint64 revision, const CoverArtResult &result);
     void setCategoryMutationBusy(bool busy);
     // Playback identity is independent of the currently browsed work/selection.
@@ -80,9 +88,10 @@ public:
     // The directory models and browser remain owned by this widget.
     [[nodiscard]] QSplitter *workspaceSplitter() const { return m_workspaceSplitter; }
     [[nodiscard]] QWidget *sidebarWidget() const { return m_sidebar; }
-    // Actual styled import icon center, in LibraryPanel coordinates.
-    [[nodiscard]] QPoint importIconCenter() const;
+    // Center of the sidebar's favorites heart, in LibraryPanel coordinates.
+    [[nodiscard]] QPoint favoritesIconCenter() const;
     [[nodiscard]] QMenu *settingsMenu() const { return m_settingsMenu; }
+    [[nodiscard]] QPushButton *lastSidebarActionButton() const { return m_importMenuButton; }
     void setWorkspaceFooter(QWidget *footer);
     // Temporarily transfer the same footer to the playback detail page.
     [[nodiscard]] QWidget *takeWorkspaceFooter();
@@ -117,11 +126,16 @@ signals:
     void refreshScanRootsRequested();
     void cancelImportRequested();
     void aiSubtitlesRequested();
+    void mobilePlaybackRequested();
     void workSelected(qint64 workId);
     void workFolderRequested(qint64 workId);
     void workRemovalRequested(qint64 workId);
     void workReferencesRequested(qint64 workId);
     void trackPlayRequested(qint64 fileId);
+    void favoriteTrackPlayRequested(qint64 fileId);
+    void favoriteTrackRemovalRequested(qint64 fileId);
+    void directoryTrackFavoriteRequested(qint64 workId, qint64 fileId, bool liked);
+    void favoriteDurationDemandChanged(const QVector<qint64> &visibleAudioFileIds);
     void directoryPlayRequested(qint64 workId, const QString &relativeDirectory, bool recursive);
     void trackEnqueueRequested(qint64 fileId);
     void tracksEnqueueRequested(qint64 workId, const QVector<qint64> &fileIds);
@@ -143,6 +157,8 @@ protected:
 
 private:
     void activateItem(const QModelIndex &index);
+    bool handleDirectoryFavoriteMouse(QMouseEvent *event);
+    void toggleDirectoryFavorite(const QModelIndex &index, const QPoint &position);
     void requestTrackPlayback(const QModelIndex &index);
     [[nodiscard]] bool canRequestQueuePlayback() const;
     [[nodiscard]] bool hasAvailableDirectoryAudio() const;
@@ -160,6 +176,8 @@ private:
     void showCategoryContextMenu(const QModelIndex &index, const QPoint &globalPosition);
     void invalidateCategoryContextMenu();
     void setSidebarLocation(bool categories, qint64 categoryId = 0);
+    void showFavorites(bool show);
+    void openSidebarWork(const QModelIndex &index);
     void updateCategoryFilter(bool resetSearch = false);
     void rebuildCategoryRows();
     void publishCategoryCoverDemand(bool force);
@@ -206,6 +224,10 @@ private:
     QStandardItemModel *m_categoriesModel = nullptr;
     QToolButton *m_allWorksButton = nullptr;
     QToolButton *m_categoriesButton = nullptr;
+    QPushButton *m_favoritesButton = nullptr;
+    QStackedWidget *m_browsePages = nullptr;
+    FavoriteTracksView *m_favoritesView = nullptr;
+    QLabel *m_favoritesEmptyLabel = nullptr;
     QToolButton *m_categoryBackButton = nullptr;
     QToolButton *m_createCategoryButton = nullptr;
     QLabel *m_categoryNameLabel = nullptr;
@@ -236,6 +258,10 @@ private:
     QVector<qint64> m_lastDurationDemandVisible;
     bool m_forceDurationDemand = false;
     QTableView *m_tracksView = nullptr;
+    QPersistentModelIndex m_pressedFavorite;
+    QPointer<QMessageBox> m_directoryFavoriteConfirmation;
+    QElapsedTimer m_lastFavoriteConfirmation;
+    QPoint m_lastFavoritePosition;
     QPushButton *m_playDirectoryButton = nullptr;
     QToolButton *m_coverMenuButton = nullptr;
     QHash<qint64, bool> m_manualCovers;
@@ -311,6 +337,7 @@ private:
     QPushButton *m_importMenuButton = nullptr;
     QPushButton *m_aiSubtitlesButton = nullptr;
     QPushButton *m_settingsButton = nullptr;
+    QPushButton *m_mobilePlaybackButton = nullptr;
     QMenu *m_settingsMenu = nullptr;
     QAction *m_importAction = nullptr;
     QAction *m_addScanRootAction = nullptr;

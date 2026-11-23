@@ -83,14 +83,18 @@ Result fail(Result result, const QString &error, const std::atomic_bool &cancell
 {
     result.state = cancelled.load() ? State::Cancelled : State::Failed;
     result.srtPath.clear(); // A failed/cancelled partial file is never offered for loading.
-    result.error = cancelled.load() ? QStringLiteral("Translation cancelled. Task logs were retained.") : error;
+    result.error = cancelled.load() ? QStringLiteral("Subtitle generation cancelled. Task logs were retained.") : error;
     return result;
 }
 
-Result translate(const Request &request, const std::atomic_bool &cancelled, const Report &report)
+Result generate(const Request &request, const std::atomic_bool &cancelled, const Report &report)
 {
+    const bool transcribe = request.purpose == ChickenRicePurpose::Transcribe;
+    const QString taskName = transcribe ? QStringLiteral("transcribe") : QStringLiteral("translate");
     Result result;
     result.audioPath = request.audioPath;
+    result.mode = transcribe ? QStringLiteral("offline-asr-ja") : QStringLiteral("offline-direct");
+    result.language = transcribe ? QStringLiteral("ja") : QStringLiteral("zh");
     report({State::Preparing, QStringLiteral("Preparing task and checking audio paths"), {}});
     if (cancelled.load())
         return fail(result, {}, cancelled);
@@ -125,13 +129,13 @@ Result translate(const Request &request, const std::atomic_bool &cancelled, cons
     if (!testProcess) {
         // Structural/JSON checks have no reliable byte percentage.
         report({State::CheckingModel, QStringLiteral("Checking local model files and component configuration"), {}});
-        if (!validateChickenRiceEngine(engine, &error))
+        if (!validateChickenRiceEngine(engine, &error, request.purpose))
             return fail(result, error, cancelled);
     }
     if (cancelled.load()) return fail(result, {}, cancelled);
     QString program = testProcess ? request.executableForTests : QDir(engine).filePath(QStringLiteral("infer.exe"));
     if (!QFileInfo(program).isAbsolute() || !QFileInfo(program).isFile() || !safeAncestors(program))
-        return fail(result, QStringLiteral("Translation executable is missing or unsafe."), cancelled);
+        return fail(result, QStringLiteral("Chicken Rice executable is missing or unsafe."), cancelled);
     if (!testProcess && !request.argumentsForTests.isEmpty())
         return fail(result, QStringLiteral("Test arguments require an explicit test executable."), cancelled);
     const QString root = QDir::cleanPath(QFileInfo(request.outputRoot).absoluteFilePath());
@@ -153,7 +157,7 @@ Result translate(const Request &request, const std::atomic_bool &cancelled, cons
         return fail(result, QStringLiteral("The engine latest.log is linked or is not an ordinary file; it will not be overwritten."), cancelled);
     const QString lockPath = QDir(engine).filePath(QStringLiteral(".arcanblade-translate.lock"));
     if (reparsePoint(lockPath))
-        return fail(result, QStringLiteral("Engine translation lock is linked."), cancelled);
+        return fail(result, QStringLiteral("Engine lock is linked."), cancelled);
     QLockFile lock(lockPath);
     lock.setStaleLockTime(0);
     if (QFileInfo::exists(lockPath)) {
@@ -163,19 +167,19 @@ Result translate(const Request &request, const std::atomic_bool &cancelled, cons
             return fail(result, QStringLiteral("The engine has an unknown or another application's lock."), cancelled);
     }
     if (!lock.tryLock(0))
-        return fail(result, QStringLiteral("Another translation is using this engine. Run tracks sequentially."), cancelled);
+        return fail(result, QStringLiteral("Another task is using this engine. Run tracks sequentially."), cancelled);
     if (!QDir().mkpath(root))
-        return fail(result, QStringLiteral("Could not create the translation output root."), cancelled);
+        return fail(result, QStringLiteral("Could not create the subtitle output root."), cancelled);
     QString task;
     for (int attempt = 0; attempt < 3 && task.isEmpty(); ++attempt) {
-        const QString name = QStringLiteral("mode-a-")
+        const QString name = (transcribe ? QStringLiteral("asr-ja-") : QStringLiteral("mode-a-"))
             + QDateTime::currentDateTimeUtc().toString(QStringLiteral("yyyyMMdd-HHmmss-"))
             + QUuid::createUuid().toString(QUuid::WithoutBraces);
         if (QDir(root).mkdir(name))
             task = QDir(root).filePath(name);
     }
     if (task.isEmpty())
-        return fail(result, QStringLiteral("Could not create an exclusive translation task directory."), cancelled);
+        return fail(result, QStringLiteral("Could not create an exclusive subtitle task directory."), cancelled);
     result.taskDirectory = task;
     result.logPath = QDir(task).filePath(QStringLiteral("process.log"));
     const QString snapshot = QDir(task).filePath(QStringLiteral("generation_config.snapshot.json5"));
@@ -199,7 +203,7 @@ Result translate(const Request &request, const std::atomic_bool &cancelled, cons
     QStringList arguments{
         QStringLiteral("--model_name_or_path"), QDir(engine).filePath(QStringLiteral("models")),
         QStringLiteral("--device"), request.computeMode == ChickenRiceComputeMode::Cpu ? QStringLiteral("cpu") : QStringLiteral("cuda"),
-        QStringLiteral("--task"), QStringLiteral("translate"),
+        QStringLiteral("--task"), taskName,
         QStringLiteral("--audio_suffixes"), QFileInfo(audio.path).suffix().toLower(),
         QStringLiteral("--sub_formats"), QStringLiteral("srt"),
         QStringLiteral("--output_dir"), task,
@@ -227,7 +231,8 @@ Result translate(const Request &request, const std::atomic_bool &cancelled, cons
         argumentJson.append(argument);
     const QJsonObject manifest{{QStringLiteral("program"), program}, {QStringLiteral("arguments"), argumentJson},
         {QStringLiteral("audioPath"), request.audioPath}, {QStringLiteral("workingDirectory"), engine},
-        {QStringLiteral("offline"), true},
+        {QStringLiteral("offline"), true}, {QStringLiteral("engine"), QStringLiteral("chicken-rice")},
+        {QStringLiteral("task"), taskName}, {QStringLiteral("mode"), result.mode}, {QStringLiteral("language"), result.language},
         {QStringLiteral("generation"), chickenRiceGenerationRecord(request.generationOptions)},
         {QStringLiteral("computeMode"), aiSubtitleComputeModeKey(request.computeMode)},
         {QStringLiteral("computeType"), request.computeMode == ChickenRiceComputeMode::GpuHighMemory ? QStringLiteral("component-default")
@@ -238,13 +243,15 @@ Result translate(const Request &request, const std::atomic_bool &cancelled, cons
     if (!writeNewFile(QDir(task).filePath(QStringLiteral("request.json")), QJsonDocument(manifest).toJson(), &error))
         return fail(result, error, cancelled);
     const auto execution = runAiSubtitleProcess({program, arguments, engine, environment, result.logPath,
-        QStringLiteral("Running offline Japanese-to-Chinese translation"), false, logPreamble}, cancelled, report);
+        transcribe ? QStringLiteral("Recognising Japanese speech with Chicken Rice") : QStringLiteral("Running offline Japanese-to-Chinese translation"),
+        false, logPreamble}, cancelled, report);
     result.exitCode = execution.exitCode;
     result.warnings.append(execution.warnings);
     if (!execution.succeeded)
         return fail(result, execution.error, cancelled);
     return validateAndPublishAiSubtitle({request.audioPath, request.libraryRoot, request.libraryRelativePath,
-        expectedSrt, QStringLiteral("offline-direct"), QStringLiteral("zh"), QStringLiteral("offline_translate_"), QString::fromUtf8(execution.tail), initialAudioSize, initialAudioModified,
+        expectedSrt, result.mode, result.language, transcribe ? QStringLiteral("offline_asr_") : QStringLiteral("offline_translate_"),
+        QString::fromUtf8(execution.tail), initialAudioSize, initialAudioModified,
         request.outputBatchId, request.outputFileSuffix},
         result, cancelled, report);
 }
@@ -257,7 +264,7 @@ struct ChickenRiceTranslateService::WorkerState {
     bool changed = false;
 };
 ChickenRiceTranslateService::ChickenRiceTranslateService(QObject *parent, Executor executor)
-    : QObject(parent), m_executor(executor ? std::move(executor) : Executor(translate)),
+    : QObject(parent), m_executor(executor ? std::move(executor) : Executor(generate)),
       m_progressTimer(new QTimer(this))
 {
     qRegisterMetaType<Progress>();
@@ -309,8 +316,13 @@ bool ChickenRiceTranslateService::start(const Request &request)
         promise->start();
         Result result;
         try {
-            const QString generationError = isValidAiSubtitleComputeMode(request.computeMode)
-                ? validateChickenRiceGenerationOptions(request.generationOptions) : QStringLiteral("Unknown inference execution mode.");
+            QString generationError;
+            if (request.purpose != ChickenRicePurpose::Translate && request.purpose != ChickenRicePurpose::Transcribe)
+                generationError = QStringLiteral("Unknown Chicken Rice task.");
+            else if (!isValidAiSubtitleComputeMode(request.computeMode))
+                generationError = QStringLiteral("Unknown inference execution mode.");
+            else
+                generationError = validateChickenRiceGenerationOptions(request.generationOptions);
             if (worker->cancelled.load() || !generationError.isEmpty()) {
                 result.state = worker->cancelled.load() ? State::Cancelled : State::Failed;
                 result.error = generationError;
@@ -326,7 +338,7 @@ bool ChickenRiceTranslateService::start(const Request &request)
             result.error = QString::fromUtf8(exception.what());
         } catch (...) {
             result.state = worker->cancelled.load() ? State::Cancelled : State::Failed;
-            result.error = QStringLiteral("Unexpected local translation error.");
+            result.error = QStringLiteral("Unexpected local subtitle generation error.");
         }
         if (result.audioPath.isEmpty()) result.audioPath = request.audioPath;
         promise->addResult(std::move(result));

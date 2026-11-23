@@ -4,7 +4,6 @@
 #include <QDateTime>
 #include <QObject>
 #include <QPointer>
-#include <QSet>
 #include <QUrl>
 
 QT_BEGIN_NAMESPACE
@@ -38,12 +37,11 @@ struct UpdateCheckResult {
 };
 
 struct UpdateCheckOptions {
-    // Empty means the fixed public GitHub endpoint. Other endpoints are
+    // Empty means the fixed GitHub Pages manifest. Other endpoints are
     // accepted only as HTTP loopback fixtures; there is no persisted URL setting.
     QUrl endpoint;
     int timeoutMs = 15000;
     qsizetype maximumResponseBytes = 2 * 1024 * 1024;
-    int maximumPages = 10;
 };
 
 [[nodiscard]] bool isAllowedReleasePageUrl(const QUrl &url);
@@ -70,7 +68,7 @@ signals:
     void busyChanged(bool busy);
 
 private:
-    void requestPage(const QUrl &url, quint64 generation);
+    void requestManifest(quint64 generation);
     void readAvailable(QNetworkReply *reply, quint64 generation);
     void replyFinished(QNetworkReply *reply, quint64 generation);
     void complete(UpdateCheckResult result);
@@ -79,15 +77,10 @@ private:
     QNetworkAccessManager *m_manager = nullptr;
     QTimer *m_timeout = nullptr;
     QPointer<QNetworkReply> m_reply;
-    QSet<QString> m_seenPages;
     QByteArray m_response;
-    qsizetype m_totalResponseBytes = 0;
-    qsizetype m_previousPageBytes = 0;
     QString m_currentVersion;
-    UpdateCheckResult m_best;
     UpdateCheckResult m_result;
     quint64 m_generation = 0;
-    int m_pageCount = 0;
     bool m_includePrereleases = false;
     bool m_busy = false;
     bool m_completing = false;

@@ -502,6 +502,35 @@ LibraryAutoBindingResult LibraryRepository::addAutoSubtitleBindings(
     return counts;
 }
 
+LibraryOperationResult LibraryRepository::bindRecommendedSubtitle(
+    const LibraryTrackSubtitlesResult &expected, qint64 subtitleFileId)
+{
+    return writeSubtitleChange([&]() -> LibraryOperationResult {
+        if (!expected.success || expected.preference.state != SubtitlePreferenceState::Unset)
+            return failure(LibraryDiagnosticCode::InvalidSubtitleBinding, m_databasePath,
+                           QStringLiteral("只有自动选择字幕的音轨可以补充推荐关联。"));
+        const auto work = workSnapshot(expected.work.id);
+        const auto bindings = subtitleBindings(expected.audio.id);
+        const auto preference = subtitlePreference(expected.audio.id);
+        if (!work.success || !bindings.success || !preference.success)
+            return {false, work.diagnostics + bindings.diagnostics + preference.diagnostics};
+        if (work.work != expected.work || work.files != expected.files
+            || bindings.bindings != expected.bindings || preference.preference != expected.preference)
+            return failure(LibraryDiagnosticCode::StaleWorkSnapshot, m_databasePath,
+                           QStringLiteral("音轨或字幕设置已更新，需重新选择。"));
+        if (!work.files.contains(expected.audio))
+            return failure(LibraryDiagnosticCode::InvalidSubtitleBinding, m_databasePath,
+                           QStringLiteral("推荐字幕的音轨不属于当前作品。"));
+        const auto valid = validateBindingPair(m_database, m_databasePath, expected.audio.id, subtitleFileId, true);
+        if (!valid.success)
+            return valid;
+        return executeChange(m_database, m_databasePath, QStringLiteral("Bind recommended subtitle"),
+                             QStringLiteral("INSERT INTO subtitle_bindings(audio_file_id, subtitle_file_id, source) "
+                                            "VALUES (?, ?, ?) ON CONFLICT(audio_file_id, subtitle_file_id) DO NOTHING"),
+                             {expected.audio.id, subtitleFileId, static_cast<int>(SubtitleBindingSource::Auto)});
+    });
+}
+
 LibraryOperationResult LibraryRepository::bindSubtitle(
     qint64 audioFileId, qint64 subtitleFileId, SubtitleBindingSource source,
     SubtitleBindingAvailabilityPolicy availabilityPolicy)

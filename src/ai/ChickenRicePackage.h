@@ -26,9 +26,11 @@ struct ChickenRicePackage {
     QByteArray sha256; // SHA-256 of the reconstructed ZIP, lowercase hex.
     QList<ChickenRicePackagePart> parts; // Original byte order.
     qint64 unpackedSize = 0; // Pinned expanded bytes; zero permits small test fixtures.
+    ChickenRicePurpose purpose = ChickenRicePurpose::Translate;
 };
 
-[[nodiscard]] std::optional<ChickenRicePackage> chickenRicePackage(ChickenRiceVariant variant);
+[[nodiscard]] std::optional<ChickenRicePackage> chickenRicePackage(ChickenRiceVariant variant,
+    ChickenRicePurpose purpose = ChickenRicePurpose::Translate);
 [[nodiscard]] bool validateChickenRicePackage(const ChickenRicePackage &package,
     QString *error = nullptr, bool allowLoopbackHttp = false);
 

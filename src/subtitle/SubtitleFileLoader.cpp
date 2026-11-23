@@ -36,8 +36,10 @@ bool SubtitleFileLoadResult::succeeded() const
     return error == SubtitleFileError::None && !entries.isEmpty();
 }
 
-SubtitleFileLoadResult SubtitleFileLoader::load(const QString &path, SubtitleFormat format)
+SubtitleFileLoadResult SubtitleFileLoader::load(const QString &path, SubtitleFormat format, QByteArray *sourceBytes)
 {
+    if (sourceBytes)
+        sourceBytes->clear();
     if (format != SubtitleFormat::Srt && format != SubtitleFormat::Vtt
         && format != SubtitleFormat::Lrc) {
         return failure(SubtitleFileError::UnsupportedFormat,
@@ -106,7 +108,7 @@ SubtitleFileLoadResult SubtitleFileLoader::load(const QString &path, SubtitleFor
                 diagnostic.severity == SrtDiagnosticSeverity::Error
                     ? SubtitleLoadDiagnosticSeverity::Error
                     : SubtitleLoadDiagnosticSeverity::Warning,
-                diagnostic.line, diagnostic.message});
+                diagnostic.line, diagnostic.message, diagnostic.code});
         }
     } else if (format == SubtitleFormat::Vtt) {
         auto parsed = VttParser::parse(text);
@@ -156,6 +158,8 @@ SubtitleFileLoadResult SubtitleFileLoader::load(const QString &path, SubtitleFor
         result.errorMessage = QStringLiteral("字幕文件中没有可用的 %1 字幕条目，请检查解析诊断。")
                                   .arg(formatName);
     }
+    if (sourceBytes && result.succeeded())
+        *sourceBytes = std::move(bytes);
     return result;
 }
 

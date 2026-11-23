@@ -36,7 +36,8 @@ public:
     explicit GpuRecommendationDialog(QSettings *settings, QWidget *parent = nullptr,
                                      Probe probe = {},
                                      ChickenRiceInstallService *installer = nullptr,
-                                     bool embedded = false);
+                                     bool embedded = false,
+                                     ChickenRicePurpose purpose = ChickenRicePurpose::Translate);
     ~GpuRecommendationDialog() override;
 
     void startDetection();
@@ -72,6 +73,9 @@ private:
     void finishShutdownIfReady();
 
     QPointer<QSettings> m_settings;
+    const ChickenRicePurpose m_purpose;
+    const QString m_componentGroup;
+    const QString m_recommendationGroup;
     Probe m_probe;
     std::shared_ptr<std::atomic_bool> m_cancelled;
     QList<GpuDevice> m_devices;
@@ -84,6 +88,7 @@ private:
     bool m_ownsInstaller = false;
     bool m_embedded = false;
     bool m_installCancelRequested = false;
+    bool m_awaitingInstallResult = false;
     QString m_installFeedback;
     QString m_selectionFeedback;
     QTimer *m_autoSaveTimer = nullptr;

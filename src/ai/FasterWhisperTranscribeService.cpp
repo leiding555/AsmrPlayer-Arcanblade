@@ -4,11 +4,6 @@
 #include "ai/AiSubtitleProcess.h"
 #include "ai/AiSubtitleOutput.h"
 #include "playback/AudioFileValidation.h"
-#include "subtitle/SubtitleFileLoader.h"
-#include <QCryptographicHash>
-#include <QStringDecoder>
-#include <cmath>
-#include <QCoreApplication>
 #include <QDateTime>
 #include <QDir>
 #include <QFile>
@@ -22,7 +17,6 @@
 #include <QPointer>
 #include <QProcessEnvironment>
 #include <QPromise>
-#include <QRegularExpression>
 #include <QThreadPool>
 #include <QTimer>
 #include <QUuid>
@@ -78,84 +72,6 @@ Result fail(Result result, const QString &error, const std::atomic_bool &cancell
     result.srtPath.clear(); // A failed/cancelled partial file is never offered for loading.
     result.error = cancelled.load() ? QStringLiteral("Recognition cancelled. Task logs were retained.") : error;
     return result;
-}
-
-// This recovery is restricted to the verified official r245.4 executable.
-// It never changes the generic process result or accepts a parseable prefix.
-bool completedCrashOutput(const QString &program, bool testProcess, const QString &task,
-    const QString &audio, const QByteArray &tail, const std::atomic_bool &cancelled, QString *error)
-{
-    const auto reject = [error](const QString &message) { *error = message; return false; };
-    if (cancelled.load()) return false;
-    if (!testProcess) {
-        QFile executable(program);
-        QCryptographicHash hash(QCryptographicHash::Sha256);
-        if (!safeAncestors(program) || !executable.open(QIODevice::ReadOnly) || !hash.addData(&executable)
-            || hash.result().toHex() != QByteArray("cce4c27d0d7039c93b06c6f962374ea3e8b605dbb9bf564ad23db4c46f1a15c1"))
-            return reject(QStringLiteral("退出异常恢复仅支持已核验的官方 r245.4 识别程序。"));
-    }
-    const QString log = QString::fromUtf8(tail);
-    const QString written = QStringLiteral("Subtitles are written to '%1' directory.")
-        .arg(QDir::toNativeSeparators(task));
-    const qsizetype writtenAt = log.lastIndexOf(written);
-    static const QRegularExpression finished(QStringLiteral(
-        "(?:^|[\\r\\n])Operation finished in:\\s+[0-9]+:[0-9]{2}:[0-9]{2}(?:\\.[0-9]+)?[ \\t]*(?:[\\r\\n]|$)"));
-    if (writtenAt < 0 || !finished.match(log, writtenAt + written.size()).hasMatch())
-        return reject(QStringLiteral("缺少本次任务的字幕写出及操作完成记录，未恢复异常退出结果。"));
-
-    const QString stem = QFileInfo(audio).completeBaseName();
-    const QString srtPath = QDir(task).filePath(stem + QStringLiteral(".srt"));
-    const QString jsonPath = QDir(task).filePath(stem + QStringLiteral(".json"));
-    constexpr qint64 JsonLimit = 32 * 1024 * 1024;
-    const QFileInfo jsonInfo(jsonPath);
-    if (!safeAncestors(srtPath) || !safeAncestors(jsonPath) || !jsonInfo.isFile()
-        || jsonInfo.size() <= 0 || jsonInfo.size() > JsonLimit)
-        return reject(QStringLiteral("本次 JSON 结果缺失、过大或路径无效。"));
-    QFile file(jsonPath);
-    if (!file.open(QIODevice::ReadOnly) || file.isSequential())
-        return reject(QStringLiteral("无法读取本次 JSON 结果。"));
-    const QByteArray bytes = file.read(JsonLimit + 1);
-    if (file.error() != QFileDevice::NoError || bytes.size() > JsonLimit || !file.atEnd())
-        return reject(QStringLiteral("本次 JSON 结果读取不完整或超过大小上限。"));
-    QStringDecoder decoder(QStringConverter::Utf8, QStringConverter::Flag::Stateless);
-    const QString jsonText = decoder(bytes);
-    QJsonParseError parseError;
-    const auto document = QJsonDocument::fromJson(bytes, &parseError);
-    if (decoder.hasError() || jsonText.isEmpty() || parseError.error != QJsonParseError::NoError || !document.isObject())
-        return reject(QStringLiteral("本次 JSON 结果不是完整有效的 UTF-8 JSON。"));
-    const auto object = document.object();
-    if (object.value(QStringLiteral("language")).toString() != QStringLiteral("ja")
-        || !object.value(QStringLiteral("segments")).isArray())
-        return reject(QStringLiteral("本次 JSON 结果缺少日语分段信息。"));
-    const auto loaded = SubtitleFileLoader::load(srtPath, SubtitleFormat::Srt);
-    if (cancelled.load()) return false;
-    if (!loaded.succeeded())
-        return reject(QStringLiteral("异常退出后的 SRT 未通过现有字幕解析校验。"));
-    for (const auto &diagnostic : loaded.diagnostics)
-        if (diagnostic.severity == SubtitleLoadDiagnosticSeverity::Error)
-            return reject(QStringLiteral("异常退出后的 SRT 包含解析错误。"));
-    const auto segments = object.value(QStringLiteral("segments")).toArray();
-    if (segments.size() != loaded.entries.size())
-        return reject(QStringLiteral("异常退出后的 SRT 与 JSON 分段数量不一致。"));
-    qint64 previousStart = -1;
-    for (qsizetype index = 0; index < segments.size(); ++index) {
-        if (cancelled.load()) return false;
-        const auto segment = segments.at(index).toObject();
-        const auto &entry = loaded.entries.at(index);
-        const auto startValue = segment.value(QStringLiteral("start"));
-        const auto endValue = segment.value(QStringLiteral("end"));
-        const double start = startValue.toDouble(-1);
-        const double end = endValue.toDouble(-1);
-        if (!startValue.isDouble() || !endValue.isDouble() || !std::isfinite(start) || !std::isfinite(end)
-            || start < 0 || end <= start || entry.startMs < previousStart || entry.endMs <= entry.startMs
-            || std::abs(start * 1000 - double(entry.startMs)) > 1.1
-            || std::abs(end * 1000 - double(entry.endMs)) > 1.1
-            || entry.text.trimmed().isEmpty() || !segment.value(QStringLiteral("text")).isString()
-            || segment.value(QStringLiteral("text")).toString().simplified() != entry.text.simplified())
-            return reject(QStringLiteral("异常退出后的 SRT 与 JSON 时间轴或字幕内容不一致。"));
-        previousStart = entry.startMs;
-    }
-    return true;
 }
 
 Result transcribe(const Request &request, const std::atomic_bool &cancelled, const Report &report)
@@ -277,12 +193,11 @@ Result transcribe(const Request &request, const std::atomic_bool &cancelled, con
     result.warnings.append(execution.warnings);
     bool recoveredCrash = false;
     QString processError = execution.error;
-    if (!execution.succeeded && request.computeMode == AiSubtitleComputeMode::GpuLowMemory
+    if (!execution.succeeded && request.computeMode != AiSubtitleComputeMode::Cpu
         && result.exitCode == -1073740791 && execution.abnormalExitWithoutActiveWorkers && !cancelled.load()) {
-        QString recoveryError;
-        recoveredCrash = completedCrashOutput(program, testProcess, task, audio.path, execution.tail, cancelled, &recoveryError);
-        if (!recoveredCrash && !recoveryError.isEmpty())
-            processError += QLatin1Char('\n') + recoveryError;
+        recoveredCrash = execution.whisperTaskFinished;
+        if (!recoveredCrash)
+            processError += QStringLiteral("\n缺少本次任务目录的字幕写出或后续操作完成记录。");
     }
     if (!execution.succeeded && !recoveredCrash) {
         const bool effectiveVad = request.generationOptions.preset != FasterWhisperGenerationPreset::Custom
@@ -295,7 +210,8 @@ Result transcribe(const Request &request, const std::atomic_bool &cancelled, con
     const QString expectedSrt = QDir(task).filePath(QFileInfo(audio.path).completeBaseName() + QStringLiteral(".srt"));
     auto published = validateAndPublishAiSubtitle({request.audioPath, request.libraryRoot, request.libraryRelativePath,
         expectedSrt, result.mode, result.language, QStringLiteral("offline_asr_"), QString::fromUtf8(execution.tail), initialAudioSize, initialAudioModified,
-        request.outputBatchId, request.outputFileSuffix}, result, cancelled, report);
+        request.outputBatchId, request.outputFileSuffix,
+        recoveredCrash ? AiSubtitleValidation::RecoveredJapaneseAsr : AiSubtitleValidation::Strict}, result, cancelled, report);
     if (recoveredCrash && published.state == State::Succeeded)
         published.warnings.append(QStringLiteral("字幕已生成并保存；识别引擎退出时发生异常（0xC0000409）。原始日志已保留。"));
     // Keep the common strict validator authoritative. This advice applies only

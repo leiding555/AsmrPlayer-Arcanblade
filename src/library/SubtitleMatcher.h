@@ -55,6 +55,8 @@ class SubtitleMatcher final {
 public:
     static SubtitleMatchResult match(const LibraryWork &work,
                                      const QVector<LibraryFile> &files);
+    static QVector<qint64> rankedRecommendations(const LibraryWork &work, const QVector<LibraryFile> &files,
+                                                 qint64 audioId);
     // Bidirectional IDs for one present WAV and one present MP3 with the same
     // complete base name anywhere in the work. Duplicate formats do not pair.
     // Uses the same path/link guards as match(); call off the GUI thread.

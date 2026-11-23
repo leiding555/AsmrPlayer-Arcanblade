@@ -153,8 +153,6 @@ ScanRootManagerDialog::ScanRootManagerDialog(QWidget *parent)
     m_contextMenu = menu;
     menu->setObjectName(QStringLiteral("scanRootsContextMenu"));
     menu->setToolTipsVisible(true);
-    m_refresh = menu->addAction(QStringLiteral("刷新所选"));
-    m_refresh->setObjectName(QStringLiteral("scanRootRefreshAction"));
     m_remove = menu->addAction(QStringLiteral("移除扫描目录"));
     m_remove->setObjectName(QStringLiteral("scanRootRemoveAction"));
     m_remove->setToolTip(QStringLiteral("仅停止扫描，保留作品和本地文件。"));
@@ -202,10 +200,6 @@ ScanRootManagerDialog::ScanRootManagerDialog(QWidget *parent)
     connect(m_remove, &QAction::triggered, this, [this] {
         const QString root = selectedRoot();
         if (!m_busy && !root.isEmpty()) emit removeRootRequested(root);
-    });
-    connect(m_refresh, &QAction::triggered, this, [this] {
-        const QString root = selectedRoot();
-        if (!m_busy && !root.isEmpty()) emit refreshRootRequested(root);
     });
     connect(m_reviewOverlaps, &QAction::triggered, this, [this] {
         const QString root = selectedRoot();
@@ -316,7 +310,6 @@ void ScanRootManagerDialog::updateActions()
     const bool selected = !selectedRoot().isEmpty();
     m_add->setEnabled(!m_busy);
     m_remove->setEnabled(!m_busy && selected);
-    m_refresh->setEnabled(!m_busy && selected);
     m_reviewOverlaps->setEnabled(!m_busy && selected);
     m_open->setEnabled(!m_busy && selected);
     m_refreshAll->setEnabled(!m_busy && m_model->rowCount() > 0);

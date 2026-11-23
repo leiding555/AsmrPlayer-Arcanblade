@@ -27,6 +27,7 @@
 #include "ui/PlaybackQueuePanel.h"
 #include "ui/TitleBarWidget.h"
 #include "ui/WindowFrameController.h"
+#include "ui/WindowCloseChoiceDialog.h"
 #include "artwork/CoverArtService.h"
 #include "artwork/WorkCoverService.h"
 #include "playback/TrackDurationService.h"
@@ -38,6 +39,7 @@
 #include "ui/ChickenRiceTranslateDialog.h"
 
 #include <QAction>
+#include <QActionGroup>
 #include <QApplication>
 #include <QAudioDevice>
 #include <QClipboard>
@@ -259,15 +261,17 @@ MainWindow::MainWindow(const QString &libraryDatabasePath, QWidget *parent)
     auto *deviceSettings = m_libraryPanel->settingsMenu()->addAction(QStringLiteral("设备设置…"));
     deviceSettings->setObjectName(QStringLiteral("audioDeviceSettingsAction"));
     connect(deviceSettings, &QAction::triggered, this, &MainWindow::showAudioDeviceSettings);
-    auto *mobilePlayback = m_libraryPanel->settingsMenu()->addAction(QStringLiteral("手机播放…"));
-    mobilePlayback->setObjectName(QStringLiteral("mobilePlaybackAction"));
-    connect(mobilePlayback, &QAction::triggered, this, &MainWindow::showMobilePlayback);
+    connect(m_libraryPanel, &LibraryPanel::mobilePlaybackRequested, this, &MainWindow::showMobilePlayback);
     createSystemTray();
+    createCloseBehaviorMenu();
     connectSignals();
     configureTabOrder();
     updateFloatingSubtitleControls();
     connectPlaybackProgress();
+    // Publish browse snapshots and favorite writes in database operation order.
+    m_libraryBrowsePool.setMaxThreadCount(1);
     connectLibrary();
+    connectFavoriteTracks();
     connectPlaybackQueue();
     connectCoverArt();
     connectTrackDurations();
@@ -323,31 +327,10 @@ void MainWindow::restartForUpdate(const UpdateDownloadResult &result)
     auto promise = std::make_shared<QPromise<UpdateInstallPreparation>>();
     auto *watcher = new QFutureWatcher<UpdateInstallPreparation>(this);
     connect(watcher, &QFutureWatcher<UpdateInstallPreparation>::finished, this,
-            [this, watcher, cancelled] {
+            [this, watcher] {
         const auto preparation = watcher->result();
         watcher->deleteLater();
-        m_updateInstallPreparing = false;
-        if (m_closing || cancelled->load()) {
-            cancelPreparedUpdate(preparation);
-            finishCloseIfReady();
-            return;
-        }
-        setEnabled(true);
-        QString error = preparation.error;
-        const auto blockedNow = updateRestartBlockedReason();
-        if (error.isEmpty() && !blockedNow.isEmpty()) error = blockedNow;
-        if (error.isEmpty() && !commitPreparedUpdate(preparation, &error)) {
-            if (error.isEmpty()) error = QStringLiteral("无法启动更新安装，请从发布页手动下载。");
-        }
-        if (!error.isEmpty()) {
-            cancelPreparedUpdate(preparation);
-            m_updateNotifications->installPreparationFailed(error);
-            return;
-        }
-        // The helper has acknowledged readiness but still waits for THIS
-        // process to terminate. Existing close barriers save progress/drain
-        // workers; a delayed or failed close never permits early replacement.
-        close();
+        finishUpdatePreparation(preparation);
     });
     watcher->setFuture(promise->future());
     const auto hook = m_beforeUpdatePrepareTestHook;
@@ -370,6 +353,29 @@ void MainWindow::restartForUpdate(const UpdateDownloadResult &result)
         promise->addResult(std::move(preparation));
         promise->finish();
     });
+}
+
+void MainWindow::finishUpdatePreparation(const UpdateInstallPreparation &preparation)
+{
+    m_updateInstallPreparing = false;
+    if (m_closing || m_updateInstallCancelled->load()) {
+        cancelPreparedUpdate(preparation);
+        finishCloseIfReady();
+        return;
+    }
+    setEnabled(true);
+    QString error = preparation.error;
+    if (error.isEmpty()) error = updateRestartBlockedReason();
+    if (error.isEmpty() && !commitPreparedUpdate(preparation, &error)) {
+        if (error.isEmpty()) error = QStringLiteral("无法启动更新安装，请从发布页手动下载。");
+    }
+    if (!error.isEmpty()) {
+        cancelPreparedUpdate(preparation);
+        m_updateNotifications->installPreparationFailed(error);
+        return;
+    }
+    // The updater is waiting for this process to exit after its workers drain.
+    beginShutdown();
 }
 
 // Keep subtitles independent of the native main-window owner/minimize group.
@@ -580,8 +586,8 @@ void MainWindow::createUi()
     auto *brandObserver = new BrandAlignmentObserver(this, [this] { syncTitleBrandAlignment(); });
     m_libraryPanel->sidebarWidget()->installEventFilter(brandObserver);
     m_titleBar->installEventFilter(brandObserver);
-    if (auto *importButton = m_libraryPanel->findChild<QWidget *>(QStringLiteral("libraryImportMenuButton")))
-        importButton->installEventFilter(brandObserver);
+    if (auto *favoritesButton = m_libraryPanel->findChild<QWidget *>(QStringLiteral("libraryFavoritesButton")))
+        favoritesButton->installEventFilter(brandObserver);
     m_queuePanel = new PlaybackQueuePanel(this);
     m_floatingAppearanceDialog = new FloatingSubtitleAppearanceDialog(this);
     m_floatingAppearanceDialog->setAppearance(m_floatingSubtitleWindow->appearance());
@@ -601,7 +607,7 @@ void MainWindow::syncTitleBrandAlignment()
         QRect(m_titleBar->mapFrom(this, sidebar->mapTo(this, QPoint())), sidebar->size()));
     m_titleBar->setBrandIconCenterX(
         m_titleBar->mapFrom(this,
-            m_libraryPanel->mapTo(this, m_libraryPanel->importIconCenter())).x());
+            m_libraryPanel->mapTo(this, m_libraryPanel->favoritesIconCenter())).x());
 }
 
 void MainWindow::toggleMaximized()
@@ -668,6 +674,7 @@ struct LibraryQuerySnapshot {
     QVector<LibraryWork> works;
     QVector<WorkCategory> categories;
     QVector<WorkCategoryMembership> memberships;
+    QVector<LibraryFavoriteTrack> favorites;
     QVector<LibraryFile> files;
     QSet<qint64> subtitleAudioFileIds;
     qint64 selectedWorkId = 0;
@@ -805,6 +812,12 @@ LibraryQuerySnapshot queryLibrary(const QString &path, qint64 preferredWorkId)
     snapshot.works = works.works;
     snapshot.categories = works.categories;
     snapshot.memberships = works.memberships;
+    const auto favorites = repository.favoriteTracks();
+    if (!favorites.success) {
+        snapshot.error = libraryDiagnostics(favorites.diagnostics);
+        return snapshot;
+    }
+    snapshot.favorites = favorites.tracks;
     for (const auto &work : snapshot.works) {
         if (work.id == preferredWorkId) {
             snapshot.selectedWorkId = work.id;
@@ -1252,6 +1265,7 @@ void MainWindow::startLibraryQuery()
                 m_libraryPanel->setLibrary(snapshot.works, snapshot.files, snapshot.selectedWorkId,
                                            snapshot.subtitleAudioFileIds);
                 m_libraryPanel->setCategories(snapshot.categories, snapshot.memberships);
+                applyFavoriteTracks(snapshot.favorites);
                 updateCoverActions();
                 QSet<qint64> missingFileIds;
                 for (const auto &file : snapshot.files)
@@ -1269,6 +1283,7 @@ void MainWindow::startLibraryQuery()
                 scheduleStartupRootRefresh();
             } else {
                 m_libraryPanel->setLibraryError(snapshot.error);
+                updateFavoriteButton();
             }
         }
         updateScanRootManager();
@@ -1284,7 +1299,7 @@ void MainWindow::startLibraryQuery()
         }
     });
     watcher->setFuture(promise->future());
-    QThreadPool::globalInstance()->start([promise, path, workId]() {
+    m_libraryBrowsePool.start([promise, path, workId]() {
         promise->start();
         LibraryQuerySnapshot snapshot;
         try {
@@ -1385,31 +1400,27 @@ void MainWindow::startSubtitleBadgeQuery()
 
 void MainWindow::closeEvent(QCloseEvent *event)
 {
-    if (m_closing && !m_updateInstallPreparing
-        && (!m_mobilePlayback || m_mobilePlayback->isIdle())
-        && (!m_updateNotifications || m_updateNotifications->isShutdownFinished())
-        && m_libraryShutdownFinished && m_batchShutdownFinished && m_rootShutdownFinished
-        && !m_libraryQueryInProgress && !m_categoryMutationInProgress && !m_subtitleBadgeQueryInProgress && m_workFolderWorkers == 0
-        && !m_audioOpenInProgress && !m_queuePreparationInProgress
-        && !m_subtitleQueryInProgress && !m_subtitleLoadInProgress
-        && !m_subtitleChoiceQueryInProgress && !m_preferenceWriteInProgress
-        && m_preferenceRequests.isEmpty() && m_progressShutdownFinished && m_coverShutdownFinished
-        && m_workCoverShutdownFinished && m_durationShutdownFinished && m_diagnosticShutdownFinished
-        && !m_coverMutationInProgress && m_coverMutations.isEmpty() && !m_coverErrorDialog
-        && (!m_coverSelectionDialog || m_coverSelectionDialog->isIdle())
-        && (!m_workEditDialog || m_workEditDialog->isIdle())
-        && (!m_categoryNameDialog || m_categoryNameDialog->isIdle())
-        && (!m_workReferenceDialog || m_workReferenceDialog->isIdle())
-        && (!m_chickenRiceTranslateDialog || !m_chickenRiceTranslateDialog->isBusy())
-        && acknowledgePlaybackProgressCloseFailure()) {
-        event->accept();
+    if (m_closing) {
+        // Only finishCloseIfReady authorizes closing after all workers have drained.
+        event->setAccepted(m_closeScheduled);
         return;
     }
     event->ignore();
+    if (m_exitOnCloseAction->isChecked())
+        beginShutdown();
+    else if (m_hideOnCloseAction->isChecked() && canHideToTray())
+        hide();
+    else
+        showCloseChoiceDialog();
+}
+
+void MainWindow::beginShutdown()
+{
     if (m_closing)
         return;
     finishPlaybackProgressForClose();
     m_closing = true;
+    if (m_closeChoiceDialog) m_closeChoiceDialog->reject();
     if (m_mobilePlaybackDialog) m_mobilePlaybackDialog->hide();
     if (m_mobilePlayback) m_mobilePlayback->stop();
     if (m_categoryMutationCancelled) m_categoryMutationCancelled->store(true);
@@ -1495,6 +1506,7 @@ void MainWindow::closeEvent(QCloseEvent *event)
     m_libraryRootRefreshService->shutdown();
     m_libraryBatchImportService->shutdown();
     m_libraryImportService->shutdown();
+    finishCloseIfReady();
     // No nested event loop or GUI-thread join: the window stays responsive.
 }
 
@@ -1504,7 +1516,8 @@ void MainWindow::finishCloseIfReady()
         || (m_mobilePlayback && !m_mobilePlayback->isIdle())
         || (m_updateNotifications && !m_updateNotifications->isShutdownFinished())
         || !m_libraryShutdownFinished || !m_batchShutdownFinished || !m_rootShutdownFinished || m_libraryQueryInProgress
-        || m_categoryMutationInProgress || m_subtitleBadgeQueryInProgress || m_workFolderWorkers > 0
+        || m_categoryMutationInProgress || !m_pendingFavoriteFiles.isEmpty()
+        || m_subtitleBadgeQueryInProgress || m_workFolderWorkers > 0
         || m_audioOpenInProgress || m_queuePreparationInProgress || m_subtitleQueryInProgress
         || m_subtitleLoadInProgress || m_subtitleChoiceQueryInProgress
         || m_preferenceWriteInProgress || !m_preferenceRequests.isEmpty()
@@ -1522,7 +1535,9 @@ void MainWindow::finishCloseIfReady()
     if (!acknowledgePlaybackProgressCloseFailure())
         return;
     m_closeScheduled = true;
-    QMetaObject::invokeMethod(this, [this]() { close(); }, Qt::QueuedConnection);
+    QMetaObject::invokeMethod(this, [this] {
+        if (close()) emit shutdownFinished();
+    }, Qt::QueuedConnection);
 }
 
 void MainWindow::showMobilePlayback()
@@ -1766,13 +1781,81 @@ void MainWindow::createSystemTray()
     menu->addAction(m_floatingAppearanceAction);
     menu->addSeparator();
     menu->addAction(m_restoreMainWindowAction);
+    auto *exitAction = menu->addAction(QStringLiteral("退出 Arcanblade"));
+    exitAction->setObjectName(QStringLiteral("trayExitAction"));
+    connect(exitAction, &QAction::triggered, this, &MainWindow::beginShutdown);
 
     if (QSystemTrayIcon::isSystemTrayAvailable()) {
         m_systemTrayIcon = new QSystemTrayIcon(applicationIcon(), this);
         m_systemTrayIcon->setToolTip(applicationDisplayName());
         m_systemTrayIcon->setContextMenu(menu);
+        connect(m_systemTrayIcon, &QSystemTrayIcon::activated, this,
+                [this](QSystemTrayIcon::ActivationReason reason) {
+            if (reason == QSystemTrayIcon::Trigger)
+                restoreMainWindow();
+        });
         m_systemTrayIcon->show();
     }
+}
+
+bool MainWindow::canHideToTray() const
+{
+    return m_systemTrayIcon && m_systemTrayIcon->isVisible()
+        && QSystemTrayIcon::isSystemTrayAvailable();
+}
+
+void MainWindow::createCloseBehaviorMenu()
+{
+    auto *menu = m_libraryPanel->settingsMenu()->addMenu(QStringLiteral("关闭主窗口时"));
+    menu->setObjectName(QStringLiteral("windowCloseBehaviorMenu"));
+    auto *group = new QActionGroup(menu);
+    m_exitOnCloseAction = menu->addAction(QStringLiteral("关闭程序"));
+    m_hideOnCloseAction = menu->addAction(QStringLiteral("隐藏到托盘"));
+    m_exitOnCloseAction->setObjectName(QStringLiteral("windowCloseExitAction"));
+    m_hideOnCloseAction->setObjectName(QStringLiteral("windowCloseHideToTrayAction"));
+    m_exitOnCloseAction->setData(QStringLiteral("exit"));
+    m_hideOnCloseAction->setData(QStringLiteral("tray"));
+    const auto key = QStringLiteral("window/closeBehavior");
+    const QString saved = m_settings.value(key).toString();
+    for (auto *action : {m_exitOnCloseAction, m_hideOnCloseAction}) {
+        group->addAction(action);
+        action->setCheckable(true);
+        action->setChecked(action->data().toString() == saved);
+    }
+    connect(group, &QActionGroup::triggered, this, [this, key](QAction *action) {
+        m_settings.setValue(key, action->data());
+        m_settings.sync();
+        if (m_settings.status() != QSettings::NoError)
+            qWarning() << "Could not save the main window close preference";
+    });
+}
+
+void MainWindow::showCloseChoiceDialog()
+{
+    if (m_closeChoiceDialog) {
+        m_closeChoiceDialog->raise();
+        m_closeChoiceDialog->activateWindow();
+        return;
+    }
+    auto *dialog = new WindowCloseChoiceDialog(canHideToTray(), this);
+    m_closeChoiceDialog = dialog;
+    connect(dialog, &QDialog::finished, this, [this, dialog](int choice) {
+        m_closeChoiceDialog = nullptr;
+        dialog->deleteLater();
+        if (m_closing) return;
+        if (choice == WindowCloseChoiceDialog::ExitProgram) {
+            m_exitOnCloseAction->trigger();
+            beginShutdown();
+        } else if (choice == WindowCloseChoiceDialog::HideToTray) {
+            if (!canHideToTray()) {
+                showCloseChoiceDialog();
+                return;
+            }
+            m_hideOnCloseAction->trigger();
+            hide();
+        }
+    });
+    dialog->open();
 }
 
 void MainWindow::configureTabOrder()
@@ -1782,7 +1865,7 @@ void MainWindow::configureTabOrder()
     setTabOrder(m_titleBar->closeButton(), m_libraryPanel);
     // Join the last sidebar/directory control to the next component, rather
     // than linking the library ancestor back into one of its descendants.
-    setTabOrder(m_libraryPanel->settingsMenu()->parentWidget(), m_subtitlePanel);
+    setTabOrder(m_libraryPanel->lastSidebarActionButton(), m_subtitlePanel);
     setTabOrder(m_subtitlePanel, m_playbackControls);
 }
 
@@ -1816,11 +1899,11 @@ void MainWindow::updateFloatingPlaybackControls()
 
 void MainWindow::restoreMainWindow()
 {
+    if (m_closing) return;
     if (isMinimized())
         setWindowState(windowState() & ~Qt::WindowMinimized);
     show();
     raise();
-    // Only the explicit restore action requests activation of the main window.
     activateWindow();
 }
 
@@ -2266,6 +2349,7 @@ void MainWindow::applyAudioOpenResult(const AudioFileValidationResult &result, q
     ++m_subtitleRequestGeneration;
     m_playingLibraryWorkId = workId;
     m_playingLibraryFileId = fileId;
+    updateFavoriteButton();
     m_libraryPanel->setPlayingTrack(workId, fileId);
     resetBoundSubtitleContext();
     m_subtitlePanel->setSelectionEnabled(false);

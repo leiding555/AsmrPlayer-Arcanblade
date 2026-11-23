@@ -1,5 +1,7 @@
 #pragma once
 
+#include "ai/GpuCompatibility.h"
+
 #include <QList>
 #include <QString>
 
@@ -29,6 +31,6 @@ struct ChickenRiceArchiveInspection {
     const QString &staging, QString *error = nullptr);
 // Requires the fixed v1.10 local engine, main model, VAD and feature files.
 [[nodiscard]] bool validateChickenRiceEngine(
-    const QString &root, QString *error = nullptr);
+    const QString &root, QString *error = nullptr, ChickenRicePurpose purpose = ChickenRicePurpose::Translate);
 
 } // namespace asmr

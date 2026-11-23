@@ -119,6 +119,8 @@ private:
     [[nodiscard]] ChickenRiceGenerationOptions generationOptions() const;
     void persistGenerationOptions();
     void ensureComponentPanel();
+    void selectOfflineEngine();
+    [[nodiscard]] bool useFasterWhisper() const;
     void ensureFasterWhisperPanel();
     void attachFasterWhisperPanel(FasterWhisperInstallWidget *panel);
     void ensureTranscribeService();
@@ -131,7 +133,7 @@ private:
     void changeGenerationMode();
     [[nodiscard]] bool modeSwitchAllowed() const;
     void setModeFeedback(int mode, const QString &text);
-    void attachComponentPanel(GpuRecommendationDialog *panel);
+    void attachComponentPanel(GpuRecommendationDialog *panel, ChickenRicePurpose purpose);
     void showGenerationPage();
     void refreshContentMinimum();
     void updateQueueButtonLayout();
@@ -161,7 +163,12 @@ private:
     void closePickers();
 
     QPointer<QSettings> m_settings;
-    QPointer<GpuRecommendationDialog> m_componentPanel;
+    std::array<QPointer<GpuRecommendationDialog>, 2> m_componentPanels;
+    [[nodiscard]] QPointer<GpuRecommendationDialog> &chickenRicePanel(ChickenRicePurpose purpose);
+    [[nodiscard]] bool chickenRiceInstallationBusy() const;
+    std::array<bool, 2> m_detectionStarted{};
+    ChickenRicePurpose m_chickenRicePurpose = ChickenRicePurpose::Translate;
+    bool m_chickenRiceAsr = false;
     QPointer<FasterWhisperInstallWidget> m_fasterWhisperPanel;
     GpuRecommendationDialog::Probe m_gpuProbe;
     EngineValidator m_validator;
@@ -177,7 +184,6 @@ private:
     QPointer<FasterWhisperTranscribeService> m_transcribeService;
     bool m_ownsTranscribeService = false;
     bool m_transcribeConnected = false;
-    bool m_componentDetectionStarted = false;
     bool m_fasterWhisperCheckStarted = false;
     bool m_loadingSettings = true;
     bool m_preferencesDirty = false;
@@ -201,6 +207,7 @@ private:
     bool m_batchActive = false;
     QVector<AiSubtitleTaskResult> m_batchResults;
     QString m_batchMode;
+    bool m_batchUsesFasterWhisper = false;
     int m_batchTotal = 0;
     int m_batchRowLimit = 0;
     int m_batchStarted = 0;
@@ -212,6 +219,7 @@ private:
     bool m_shutdownNotified = false;
     bool m_shutdownStarting = false;
     bool m_discovering = false;
+    int m_discoveryWorkers = 0;
     std::shared_ptr<std::atomic_bool> m_discoveryCancelled;
     ChickenRiceTranslateRequest m_frozenRequest;
     FasterWhisperTranscribeRequest m_frozenTranscribeRequest;
@@ -248,6 +256,8 @@ private:
     QPointer<TranslationApiSettingsWidget> m_translationSettingsPanel;
     QPushButton *m_componentSettingsButton = nullptr;
     QComboBox *m_modeCombo = nullptr;
+    QWidget *m_recognitionEngineRow = nullptr;
+    QComboBox *m_recognitionEngine = nullptr;
     QLabel *m_settingsHeading = nullptr;
     QStackedWidget *m_componentPages = nullptr;
     QWidget *m_fasterWhisperPage = nullptr;

@@ -479,12 +479,34 @@ QString findChickenRiceEngineRoot(const QString &staging, QString *error)
     return candidates.first();
 }
 
-bool validateChickenRiceEngine(const QString &root, QString *error)
+bool validateChickenRiceEngine(const QString &root, QString *error, ChickenRicePurpose purpose)
 {
     if (error)
         error->clear();
     if (!QDir::isAbsolutePath(root))
         return setError(error, QStringLiteral("Engine root must be absolute."));
+    if (purpose != ChickenRicePurpose::Translate && purpose != ChickenRicePurpose::Transcribe)
+        return setError(error, QStringLiteral("Unknown ChickenRice component purpose."));
+    const bool transcribe = purpose == ChickenRicePurpose::Transcribe;
+    const QString wrongPurpose = transcribe
+        ? QStringLiteral("当前目录是离线直译版，请选择 Chicken Rice 日语转录版（-transcribe）。")
+        : QStringLiteral("当前目录是日语转录版，请选择 Chicken Rice 离线直译版（-translate）。");
+    const QString marker = QStringLiteral(".arcanblade-install.json");
+    const QString markerPath = QDir(root).filePath(marker);
+    const bool hasMarker = QFileInfo::exists(markerPath) || reparsePoint(markerPath);
+    if (hasMarker) {
+        QJsonDocument record;
+        if (!readJson(root, marker, record, error))
+            return false;
+        const auto object = record.object();
+        const auto value = object.value(QStringLiteral("purpose"));
+        const QString recorded = value.isUndefined() ? QStringLiteral("translate") : value.toString();
+        if (object.value(QStringLiteral("owner")).toString() != QStringLiteral("Arcanblade.ChickenRice.Install.v1")
+            || (recorded != QStringLiteral("translate") && recorded != QStringLiteral("transcribe")))
+            return setError(error, QStringLiteral("无法识别组件安装记录中的来源或用途，请重新选择完整组件目录。"));
+        if ((recorded == QStringLiteral("transcribe")) != transcribe)
+            return setError(error, wrongPurpose);
+    }
     const QStringList binaryFiles{
         QStringLiteral("infer.exe"), QStringLiteral("_internal/python310.dll"),
         QStringLiteral("_internal/base_library.zip"), QStringLiteral("models/model.bin"),
@@ -505,11 +527,20 @@ bool validateChickenRiceEngine(const QString &root, QString *error)
         QJsonDocument document;
         if (!readJson(root, relative, document, error))
             return false;
-        if (relative.endsWith(QStringLiteral("preprocessor_config.json"))
-            && (!document.isObject()
-                || document.object().value(QStringLiteral("sampling_rate")).toInt() != 16000
-                || document.object().value(QStringLiteral("feature_size")).toInt() != 80))
-            return setError(error, QStringLiteral("Invalid local Whisper feature configuration: %1").arg(relative));
+        if (relative.endsWith(QStringLiteral("preprocessor_config.json"))) {
+            const bool mainModel = relative == QStringLiteral("models/preprocessor_config.json");
+            const int expected = transcribe && mainModel ? 128 : 80;
+            const int actual = document.object().value(QStringLiteral("feature_size")).toInt();
+            if (mainModel && actual == (transcribe ? 80 : 128)) {
+                if (hasMarker)
+                    return setError(error, QStringLiteral("组件安装记录与主模型用途不一致，请重新选择完整组件目录。"));
+                return setError(error, wrongPurpose);
+            }
+            if (!document.isObject() || document.object().value(QStringLiteral("sampling_rate")).toInt() != 16000
+                || actual != expected)
+                return setError(error, QStringLiteral("组件的 Whisper 配置 %1 应为 16000 Hz，feature_size 应为 %2。")
+                    .arg(relative).arg(expected));
+        }
     }
     return true;
 }

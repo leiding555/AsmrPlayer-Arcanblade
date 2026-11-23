@@ -27,6 +27,7 @@ struct LibrarySubtitleResolution {
     LibraryFile selectedFile;
     QVector<LibrarySubtitleIssue> issues;
     bool pruned = false;
+    bool boundRecommendation = false;
 };
 struct LibrarySubtitleOrderKey {
     QDateTime time;
@@ -60,7 +61,7 @@ inline bool librarySubtitleNewer(const LibrarySubtitleOrderKey &left, const Libr
 LibrarySubtitlePathResult validateLibrarySubtitlePath(const QString &root, const LibraryFile &file);
 LibrarySubtitleResolution resolveLibrarySubtitles(const QString &databasePath,
                                                  qint64 workId, qint64 audioFileId);
-LibrarySubtitleResolution selectLibrarySubtitles(LibraryTrackSubtitlesResult snapshot);
+LibrarySubtitleResolution selectLibrarySubtitles(const QString &databasePath, LibraryTrackSubtitlesResult snapshot);
 // Recheck containment/readability immediately before and after the existing loader.
 SubtitleFileLoadResult loadLibrarySubtitle(const QString &root, const LibraryFile &file);
 

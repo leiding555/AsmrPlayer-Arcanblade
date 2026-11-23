@@ -31,6 +31,8 @@ enum class ChickenRiceVariant {
     Cu118, Cu122, Cu128, Gfx101xDgpu, Gfx103xDgpu, Gfx110xAll, Gfx120xAll
 };
 
+enum class ChickenRicePurpose { Translate, Transcribe };
+
 enum class RecommendationStatus {
     Recommended, NeedsVerification, DriverUpdateRequired, NoAutomaticMatch
 };
@@ -46,7 +48,8 @@ struct GpuRecommendation {
 [[nodiscard]] QString chickenRiceVariantKey(ChickenRiceVariant variant);
 [[nodiscard]] QString chickenRiceVariantDisplayName(ChickenRiceVariant variant);
 // Archive base name only: v1.10 distributes this archive in numbered parts.
-[[nodiscard]] QString chickenRiceArchiveName(ChickenRiceVariant variant);
+[[nodiscard]] QString chickenRiceArchiveName(ChickenRiceVariant variant,
+    ChickenRicePurpose purpose = ChickenRicePurpose::Translate);
 [[nodiscard]] std::optional<ChickenRiceVariant> chickenRiceVariantFromKey(const QString &key);
 [[nodiscard]] GpuRecommendation recommendChickenRice(const GpuDevice &device);
 // Prefer an actionable candidate, then known dedicated memory; -1 if none matches.
@@ -58,5 +61,6 @@ Q_DECLARE_METATYPE(asmr::GpuVendor)
 Q_DECLARE_METATYPE(asmr::GpuDevice)
 Q_DECLARE_METATYPE(asmr::GpuDetectionResult)
 Q_DECLARE_METATYPE(asmr::ChickenRiceVariant)
+Q_DECLARE_METATYPE(asmr::ChickenRicePurpose)
 Q_DECLARE_METATYPE(asmr::RecommendationStatus)
 Q_DECLARE_METATYPE(asmr::GpuRecommendation)

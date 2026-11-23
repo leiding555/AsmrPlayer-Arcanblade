@@ -25,6 +25,8 @@ struct AiSubtitleProcessResult {
     // Natural abnormal parent exit, no live workers before cleanup, job drained,
     // diagnostics saved; false for cancellation, timeout or log/tree failures.
     bool abnormalExitWithoutActiveWorkers = false;
+    // The engine reported writing to this task directory and then finishing.
+    bool whisperTaskFinished = false;
 };
 // Only a complete tqdm transcription bar is recognised; arbitrary log percentages are ignored.
 [[nodiscard]] int fasterWhisperProgressPercent(const QByteArray &tail);

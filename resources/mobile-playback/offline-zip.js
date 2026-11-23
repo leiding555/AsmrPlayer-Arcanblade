@@ -124,6 +124,9 @@ const offlineZip = (() => {
           || !Number.isSafeInteger(track.order) || track.order < 0 || typeof track.name !== "string" || !track.name
           || (track.audio !== `audio-${track.id}.wav` && track.audio !== `audio-${track.id}.mp3`)
           || track.subtitles !== `subtitles-${track.id}.json`) throw invalid();
+      if (track.directory !== undefined && track.directory !== "."
+          && (typeof track.directory !== "string" || /[\\:\0]/.test(track.directory)
+            || track.directory.split("/").some(part => !part || part === "." || part === ".."))) throw invalid();
       ids.add(track.id);
       const entry = entries.get(track.audio), subtitles = entries.get(track.subtitles);
       if (!entry?.size || !subtitles?.size || subtitles.size > 64 * 1024 ** 2) throw invalid();

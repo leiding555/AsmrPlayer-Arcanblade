@@ -46,12 +46,15 @@ bool simpleName(const QString &name)
 // https://api.github.com/repos/TransWithAI/Faster-Whisper-TransWithAI-ChickenRice/releases/tags/v1.10
 // Whole ZIP hashes: release body. Per-part hashes: official asset digest fields.
 // The runtime never scrapes HTML, resolves "latest", or contacts a worker proxy.
-std::optional<ChickenRicePackage> chickenRicePackage(ChickenRiceVariant variant)
+std::optional<ChickenRicePackage> chickenRicePackage(ChickenRiceVariant variant, ChickenRicePurpose purpose)
 {
     ChickenRicePackage package;
     package.variant = variant;
     package.version = QStringLiteral("v1.10");
-    package.archiveName = chickenRiceArchiveName(variant);
+    package.purpose = purpose;
+    package.archiveName = chickenRiceArchiveName(variant, purpose);
+    if (package.archiveName.isEmpty())
+        return std::nullopt;
     const QString base = QStringLiteral(
         "https://github.com/TransWithAI/Faster-Whisper-TransWithAI-ChickenRice/releases/download/v1.10/");
     const auto addPart = [&package, &base](qint64 size, const char *hash) {
@@ -60,6 +63,60 @@ std::optional<ChickenRicePackage> chickenRicePackage(ChickenRiceVariant variant)
         package.parts.append({name, QUrl(base + name), size, QByteArray(hash)});
         package.size += size;
     };
+    // Transcription manifests supply the ZIP hash and exact part lengths. Expanded
+    // sizes come from the central directory in the last numbered release asset.
+    if (purpose == ChickenRicePurpose::Transcribe) {
+        switch (variant) {
+        case ChickenRiceVariant::Cu118:
+            package.unpackedSize = 7756105967LL;
+            package.sha256 = QByteArray("b2445e509ba35f58626e3fcff40f6d6e7634c8f632fa63ba5b8c857d2cbe0dbe");
+            addPart(2097152000LL, "07fbdd105b0077f2f45315c6c5dae1aea4d714e5369158dcf37e3c41cf4d4e16");
+            addPart(2097152000LL, "b51d86aad311089008e122d070163a57d8373e50ca446f9be0855bb04c70de6e");
+            addPart(670778972LL, "8d12f05881bc3706d54befbec93cba1b49ba3fcf52d6a56547b76fe235b0eaa5");
+            break;
+        case ChickenRiceVariant::Cu122:
+            package.unpackedSize = 8491920103LL;
+            package.sha256 = QByteArray("56144bda08f026e1457435cc778c553106617a8bd98a56e31af481cdde0baa03");
+            addPart(2097152000LL, "ff283ac608520cc41bc9035b9e409220ef4c96ec4e930b71da17eaebcf84b0a3");
+            addPart(2097152000LL, "94f5fd622696d25024e3a6b0c2e9b05140f07a072aeb739f94d07557c57b8029");
+            addPart(1101303573LL, "1a6e905e3a9a59e01e435cc8caa4f9ce59eed7de22d16d8b50102eed68e41c90");
+            break;
+        case ChickenRiceVariant::Cu128:
+            package.unpackedSize = 9406041639LL;
+            package.sha256 = QByteArray("f05d94f5235e5b782f10e46dd665b12d325611c2eb0690852b89bf7950c9c556");
+            addPart(2097152000LL, "f1d1050b31110979ef7756301d9a76036f5d8e33476fd1dbaf52d073fabc9790");
+            addPart(2097152000LL, "e56e254a22f5fac70ab663a6214199c438fabdebbcc366325af0893cda360d85");
+            addPart(1762045266LL, "9097b182df91b80cea8385e564bdb44402d1f273f6815cd6173c74dbda4e4df0");
+            break;
+        case ChickenRiceVariant::Gfx101xDgpu:
+            package.unpackedSize = 5776004430LL;
+            package.sha256 = QByteArray("17e8f8d42c39c76e874c51e5b48f06fe07ac5a0ad855f76c0f9433488adf2b1b");
+            addPart(2097152000LL, "7724d368d208753a8aafd5567adf859024024ac8eafba7e2ce66d17542504a9b");
+            addPart(1087743228LL, "cf464e10cbe8c1ab476767ffd88ff5eaa78a4c1cbbc8824ef8fa948f1a0fbfaf");
+            break;
+        case ChickenRiceVariant::Gfx103xDgpu:
+            package.unpackedSize = 5776004129LL;
+            package.sha256 = QByteArray("443ae57af623a69a64093aa139973498f7e8cd3ce9a509b35699bb2973324735");
+            addPart(2097152000LL, "402f490bd2809ab3c7e15b8c483adf1cbd1b305f1fbac31009c899ae9e4180a9");
+            addPart(1087743520LL, "1725c92c9279358a9c70be38f093368022a98904f475a55974c933f0e33dea0f");
+            break;
+        case ChickenRiceVariant::Gfx110xAll:
+            package.unpackedSize = 5776004779LL;
+            package.sha256 = QByteArray("fa7a178ac51f0757109eaa57caa285ba69abd17debda0ee40131a05f6eeda2f9");
+            addPart(2097152000LL, "07584900dfd97823fbb7a81c72c1d17a763eb921e3b0c7a10a53123abe82bcbe");
+            addPart(1087744414LL, "71459e7ff068d16c55bbc14047ceeb993dc063f82ea3131f36a1deace8df3e28");
+            break;
+        case ChickenRiceVariant::Gfx120xAll:
+            package.unpackedSize = 6226891704LL;
+            package.sha256 = QByteArray("9ce0df1732469f4d384471445971aeb1078e21acd30408ddaa17bfe043566938");
+            addPart(2097152000LL, "31dde4e5e0c39daa1023f3ff13ba0d5a4315a19c6259dad1ed982f756c9c4808");
+            addPart(1231632185LL, "2e040d36c9dc6d2fcd1c7ed36f4c79c99dfe714e35ba370fbd6ac168040fb001");
+            break;
+        default:
+            return std::nullopt;
+        }
+        return package;
+    }
     switch (variant) {
     case ChickenRiceVariant::Cu118:
         package.unpackedSize = 7755734587LL;
@@ -123,7 +180,7 @@ bool validateChickenRicePackage(const ChickenRicePackage &package, QString *erro
         || !package.archiveName.endsWith(QStringLiteral(".zip"), Qt::CaseSensitive))
         return fail(error, QStringLiteral("Invalid package version or ZIP file name."));
     if (package.version != QStringLiteral("v1.10")
-        || package.archiveName != chickenRiceArchiveName(package.variant))
+        || package.archiveName != chickenRiceArchiveName(package.variant, package.purpose))
         return fail(error, QStringLiteral("Package must match its pinned v1.10 variant."));
     if (package.size <= 0 || !validHash(package.sha256)
         || package.parts.isEmpty() || package.parts.size() > 64)

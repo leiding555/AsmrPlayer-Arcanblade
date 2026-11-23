@@ -1,6 +1,9 @@
 #include "ui/LibraryPanel.h"
 #include "ui/ApplicationBrand.h"
 #include "ui/CoverArtWidget.h"
+#include "ui/FavoriteIcon.h"
+#include "ui/FavoriteRemovalConfirmation.h"
+#include "ui/FavoriteTracksView.h"
 #include "artwork/CoverArtLoader.h"
 
 #include <QAbstractListModel>
@@ -30,6 +33,7 @@
 #include <QPersistentModelIndex>
 #include <QPolygonF>
 #include <QPushButton>
+#include <QScreen>
 #include <QSignalBlocker>
 #include <QSortFilterProxyModel>
 #include <QStandardItemModel>
@@ -39,6 +43,7 @@
 #include <QToolButton>
 #include <QTimer>
 #include <QStyle>
+#include <QStyleHints>
 #include <QStyleOptionButton>
 #include <QStyledItemDelegate>
 #include <QStyleOptionViewItem>
@@ -76,7 +81,7 @@ QLabel *plainLabel(const QString &name, QWidget *parent)
     return label;
 }
 
-enum class LibraryIcon { Folder, Audio, Add, Ai, Settings, Refresh, Edit, Back };
+enum class LibraryIcon { Folder, Audio, Add, Favorite, Ai, Settings, MobilePlayback, Refresh, Edit, Back };
 
 class SidebarButton final : public QPushButton {
 public:
@@ -136,6 +141,9 @@ QIcon lineIcon(LibraryIcon kind, const QColor &color = QColor(QStringLiteral("#B
         painter.drawLine(QPointF(7, 12), QPointF(17, 12));
         painter.drawLine(QPointF(12, 7), QPointF(12, 17));
         break;
+    case LibraryIcon::Favorite:
+        painter.drawPath(favoriteHeartPath());
+        break;
     case LibraryIcon::Ai: {
         painter.drawEllipse(QRectF(2, 2, 20, 20));
         painter.save();
@@ -156,13 +164,31 @@ QIcon lineIcon(LibraryIcon kind, const QColor &color = QColor(QStringLiteral("#B
         painter.restore();
         break;
     }
-    case LibraryIcon::Settings:
-        painter.drawEllipse(QRectF(5, 5, 14, 14));
-        painter.drawEllipse(QRectF(9, 9, 6, 6));
-        for (int turn = 0; turn < 8; ++turn) {
-            painter.save(); painter.translate(12, 12); painter.rotate(turn * 45);
-            painter.drawLine(QPointF(0, -7), QPointF(0, -10)); painter.restore();
-        }
+    case LibraryIcon::Settings: {
+        QPainterPath hexagon;
+        hexagon.moveTo(10.3, 2.4);
+        hexagon.quadTo(12, 1.4, 13.7, 2.4);
+        hexagon.lineTo(20.1, 6.1);
+        hexagon.quadTo(21.4, 6.85, 21.4, 8.45);
+        hexagon.lineTo(21.4, 15.55);
+        hexagon.quadTo(21.4, 17.15, 20.1, 17.9);
+        hexagon.lineTo(13.7, 21.6);
+        hexagon.quadTo(12, 22.6, 10.3, 21.6);
+        hexagon.lineTo(3.9, 17.9);
+        hexagon.quadTo(2.6, 17.15, 2.6, 15.55);
+        hexagon.lineTo(2.6, 8.45);
+        hexagon.quadTo(2.6, 6.85, 3.9, 6.1);
+        hexagon.closeSubpath();
+        painter.drawPath(hexagon);
+        painter.drawEllipse(QPointF(12, 12), 3.25, 3.25);
+        break;
+    }
+    case LibraryIcon::MobilePlayback:
+        painter.drawRoundedRect(QRectF(5.2, 1.6, 13.6, 20.8), 2.6, 2.6);
+        painter.drawLine(QPointF(10.5, 18.8), QPointF(13.5, 18.8));
+        painter.setPen(Qt::NoPen);
+        painter.setBrush(color);
+        painter.drawPolygon(QPolygonF{QPointF(10, 7.5), QPointF(15.5, 11), QPointF(10, 14.5)});
         break;
     case LibraryIcon::Refresh: {
         QPainterPath path;
@@ -534,6 +560,20 @@ public:
                 painter->translate(badge.center() - m_badgeTextPath.boundingRect().center());
                 painter->fillPath(m_badgeTextPath, QColor(QStringLiteral("#D7AC57")));
             }
+        } else if (index.column() == LibraryTrackTreeModel::FavoriteColumn) {
+            const auto favorite = index.data(LibraryTrackTreeModel::FavoriteRole);
+            if (favorite.isValid()) {
+                painter->translate(QRectF(option.rect).center() - QPointF(12, 12));
+                if (favorite.toBool()) {
+                    painter->fillPath(favoriteHeartPath(), QColor(QStringLiteral("#FF696E")));
+                } else {
+                    const QColor outline = index.data(LibraryPanel::MissingRole).toBool()
+                        ? QColor(QStringLiteral("#626A75")) : QColor(QStringLiteral("#B8BEC8"));
+                    painter->setBrush(Qt::NoBrush);
+                    painter->setPen(QPen(outline, 1.8, Qt::SolidLine, Qt::RoundCap, Qt::RoundJoin));
+                    painter->drawPath(favoriteHeartPath());
+                }
+            }
         } else {
             // The path column stays hidden in the application, but embedders
             // may expose it without losing its ordinary read-only rendering.
@@ -574,7 +614,7 @@ public:
         case Qt::DisplayRole:
             return work.displayName;
         case Qt::DecorationRole:
-            return m_icons.value(work.id, m_placeholder);
+            return coverIcon(work.id);
         case Qt::ToolTipRole:
             return safeToolTip(work.displayName + QLatin1Char('\n') + work.rootPath);
         case Qt::SizeHintRole:
@@ -628,6 +668,11 @@ public:
             m_icons.insert(id, workCoverIcon(result.image));
         else m_icons.remove(id);
         emit dataChanged(index(row), index(row), {Qt::DecorationRole});
+    }
+
+    QIcon coverIcon(qint64 id) const
+    {
+        return m_icons.value(id, m_placeholder);
     }
 
     void clearCover(qint64 id)
@@ -780,41 +825,56 @@ LibraryPanel::LibraryPanel(QWidget *parent)
         "QLineEdit#libraryWorkSearchEdit QToolButton:hover:enabled { background: #303A42; }"));
     m_workCountLabel = plainLabel(QStringLiteral("libraryWorkCountLabel"), sidebar);
     m_workCountLabel->setProperty("subtleLabel", true);
-    m_importMenuButton = new SidebarButton(QStringLiteral("导入作品"), sidebar);
-    m_importMenuButton->setIcon(lineIcon(LibraryIcon::Add));
-    m_importMenuButton->setIconSize(QSize(22, 22));
-    m_importMenuButton->setObjectName(QStringLiteral("libraryImportMenuButton"));
-    m_importMenuButton->setAccessibleName(QStringLiteral("导入作品菜单"));
-    m_importMenuButton->setMinimumWidth(0);
-    auto *importMenu = new QMenu(m_importMenuButton);
-    importMenu->setObjectName(QStringLiteral("libraryImportMenu"));
-    m_importMenuButton->setMenu(importMenu);
+    m_favoritesButton = new SidebarButton(QStringLiteral("喜欢 · 0"), sidebar);
+    m_favoritesButton->setObjectName(QStringLiteral("libraryFavoritesButton"));
+    m_favoritesButton->setIcon(lineIcon(LibraryIcon::Favorite));
+    m_favoritesButton->setIconSize(QSize(22, 22));
+    m_favoritesButton->setCheckable(true);
+    m_favoritesButton->setMinimumWidth(0);
+    connect(m_favoritesButton, &QPushButton::clicked, this, [this] { showFavorites(true); });
     const auto addAction = [](QMenu *menu, const QString &text, const QString &name) {
         auto *action = menu->addAction(text);
         action->setObjectName(name);
         return action;
     };
-    m_importAction = addAction(importMenu, QStringLiteral("导入单个作品…"), QStringLiteral("libraryImportAction"));
-    m_addScanRootAction = addAction(importMenu, QStringLiteral("添加扫描根目录…"), QStringLiteral("libraryAddScanRootAction"));
-    m_addScanRootAction->setToolTip(QStringLiteral("打开扫描目录管理，添加持续扫描的总目录。"));
-    m_aiSubtitlesButton = new SidebarButton(QStringLiteral("AI 字幕"), sidebar);
-    m_aiSubtitlesButton->setObjectName(QStringLiteral("libraryAiSubtitlesButton"));
-    m_aiSubtitlesButton->setIcon(lineIcon(LibraryIcon::Ai));
-    m_aiSubtitlesButton->setIconSize(QSize(22, 22));
-    m_aiSubtitlesButton->setAccessibleName(QStringLiteral("AI 字幕"));
-    connect(m_aiSubtitlesButton, &QPushButton::clicked, this, [this] {
-        if (!m_closing) emit aiSubtitlesRequested();
-    });
-    m_settingsButton = new SidebarButton(QStringLiteral("设置"), sidebar);
-    m_settingsButton->setIcon(lineIcon(LibraryIcon::Settings));
-    m_settingsButton->setIconSize(QSize(22, 22));
-    m_settingsButton->setObjectName(QStringLiteral("librarySettingsButton"));
-    m_settingsButton->setAccessibleName(QStringLiteral("设置菜单"));
+    auto *footer = new QWidget(sidebar);
+    footer->setObjectName(QStringLiteral("libraryFooterActions"));
+    footer->setSizePolicy(QSizePolicy::Ignored, QSizePolicy::Fixed);
+    auto *footerLayout = new QHBoxLayout(footer);
+    footerLayout->setContentsMargins(0, 0, 0, 0);
+    footerLayout->setSpacing(8);
+    footerLayout->setAlignment(Qt::AlignLeft);
+    const auto addFooterButton = [footer, footerLayout](const QString &name, const QString &label, LibraryIcon icon) {
+        auto *button = new SidebarButton(footer);
+        button->setObjectName(name);
+        button->setToolTip(label);
+        button->setAccessibleName(label);
+        button->setIcon(lineIcon(icon));
+        button->setIconSize(QSize(22, 22));
+        button->setFixedSize(36, 36);
+        footerLayout->addWidget(button);
+        return button;
+    };
+    m_settingsButton = addFooterButton(QStringLiteral("librarySettingsButton"), QStringLiteral("设置"), LibraryIcon::Settings);
     m_settingsMenu = new QMenu(m_settingsButton);
     m_settingsMenu->setObjectName(QStringLiteral("librarySettingsMenu"));
     m_settingsButton->setMenu(m_settingsMenu);
     m_manageScanRootsAction = addAction(m_settingsMenu, QStringLiteral("扫描目录管理…"), QStringLiteral("libraryManageScanRootsAction"));
     m_manageScanRootsAction->setToolTip(QStringLiteral("管理持续扫描的总目录、启动扫描设置和本次刷新结果。"));
+    m_aiSubtitlesButton = addFooterButton(QStringLiteral("libraryAiSubtitlesButton"),
+        QStringLiteral("AI 字幕（识别与翻译）"), LibraryIcon::Ai);
+    connect(m_aiSubtitlesButton, &QPushButton::clicked, this, &LibraryPanel::aiSubtitlesRequested);
+    m_mobilePlaybackButton = addFooterButton(QStringLiteral("libraryMobilePlaybackButton"),
+        QStringLiteral("手机播放"), LibraryIcon::MobilePlayback);
+    connect(m_mobilePlaybackButton, &QPushButton::clicked, this, &LibraryPanel::mobilePlaybackRequested);
+    m_importMenuButton = addFooterButton(QStringLiteral("libraryImportMenuButton"),
+        QStringLiteral("导入作品"), LibraryIcon::Add);
+    auto *importMenu = new QMenu(m_importMenuButton);
+    importMenu->setObjectName(QStringLiteral("libraryImportMenu"));
+    m_importMenuButton->setMenu(importMenu);
+    m_importAction = addAction(importMenu, QStringLiteral("导入单个作品…"), QStringLiteral("libraryImportAction"));
+    m_addScanRootAction = addAction(importMenu, QStringLiteral("添加扫描根目录…"), QStringLiteral("libraryAddScanRootAction"));
+    m_addScanRootAction->setToolTip(QStringLiteral("打开扫描目录管理，添加持续扫描的总目录。"));
     m_refreshScanRootsButton = new QPushButton(sidebar);
     m_refreshScanRootsButton->setIcon(lineIcon(LibraryIcon::Refresh));
     m_refreshScanRootsButton->setIconSize(QSize(20, 20));
@@ -1013,7 +1073,7 @@ LibraryPanel::LibraryPanel(QWidget *parent)
     sidebarLayout->setContentsMargins(16, 4, 16, 16);
     sidebarLayout->setSpacing(12);
     sidebarLayout->addWidget(brand);
-    sidebarLayout->addWidget(m_importMenuButton);
+    sidebarLayout->addWidget(m_favoritesButton);
     auto *worksHeading = new QHBoxLayout;
     worksHeading->addWidget(m_allWorksButton);
     worksHeading->addWidget(m_categoriesButton);
@@ -1029,8 +1089,7 @@ LibraryPanel::LibraryPanel(QWidget *parent)
     taskActions->setObjectName(QStringLiteral("libraryTaskActionsLayout"));
     taskActions->addWidget(m_cancelButton);
     sidebarLayout->addLayout(taskActions);
-    sidebarLayout->addWidget(m_aiSubtitlesButton);
-    sidebarLayout->addWidget(m_settingsButton);
+    sidebarLayout->addWidget(footer);
 
     auto *contentWorkspace = new QWidget(splitter);
     contentWorkspace->setObjectName(QStringLiteral("contentWorkspace"));
@@ -1043,9 +1102,12 @@ LibraryPanel::LibraryPanel(QWidget *parent)
     m_workspaceSplitter->setChildrenCollapsible(false);
     m_workspaceSplitter->setHandleWidth(6);
     m_workspaceLayout->addWidget(m_workspaceSplitter, 1);
-    auto *tracksPane = new QWidget(m_workspaceSplitter);
-    tracksPane->setObjectName(QStringLiteral("libraryTracksPane"));
-    tracksPane->setMinimumWidth(220);
+    m_browsePages = new QStackedWidget(m_workspaceSplitter);
+    m_browsePages->setObjectName(QStringLiteral("libraryTracksPane"));
+    m_browsePages->setMinimumWidth(220);
+    auto *tracksPane = new QWidget(m_browsePages);
+    tracksPane->setObjectName(QStringLiteral("libraryDirectoryPage"));
+    m_browsePages->addWidget(tracksPane);
     m_workInformation = new QWidget(tracksPane);
     m_workInformation->setObjectName(QStringLiteral("libraryWorkInformation"));
     m_workInformation->setMinimumWidth(0);
@@ -1141,6 +1203,10 @@ LibraryPanel::LibraryPanel(QWidget *parent)
     m_tracksView->horizontalHeader()->setSectionResizeMode(2, QHeaderView::Interactive);
     m_tracksView->setColumnWidth(2, 180);
     m_tracksView->setColumnHidden(2, true);
+    const int favoriteColumn = LibraryTrackTreeModel::FavoriteColumn;
+    durationHeader->setSectionResizeMode(favoriteColumn, QHeaderView::Fixed);
+    m_tracksView->setColumnWidth(favoriteColumn, 48);
+    durationHeader->moveSection(durationHeader->visualIndex(favoriteColumn), 1);
     m_durationDemandTimer = new QTimer(this);
     m_durationDemandTimer->setSingleShot(true);
     connect(m_durationDemandTimer, &QTimer::timeout, this, &LibraryPanel::publishTrackDurationDemand);
@@ -1148,7 +1214,6 @@ LibraryPanel::LibraryPanel(QWidget *parent)
         connect(scroll, &QScrollBar::valueChanged, this, [this] { scheduleTrackDurationDemand(); });
         connect(scroll, &QScrollBar::rangeChanged, this, [this] { scheduleTrackDurationDemand(); });
     }
-    m_tracksView->setToolTip(QStringLiteral("目录双击或按 Enter 进入；音轨双击或按 Enter 播放；点击“批量”可勾选多首音轨。完整路径可悬停查看。"));
     m_trackContextMenu = new QMenu(m_tracksView);
     m_trackContextMenu->setObjectName(QStringLiteral("libraryTrackContextMenu"));
     m_enqueueTrackAction = m_trackContextMenu->addAction(QStringLiteral("加入播放队列"));
@@ -1275,6 +1340,35 @@ LibraryPanel::LibraryPanel(QWidget *parent)
     m_batchToolbar->hide();
     tracksLayout->addWidget(m_batchToolbar);
     tracksLayout->addWidget(m_tracksStack, 1);
+    auto *favoritePage = new QWidget(m_browsePages);
+    favoritePage->setObjectName(QStringLiteral("libraryFavoritesPage"));
+    auto *favoriteLayout = new QVBoxLayout(favoritePage);
+    favoriteLayout->setContentsMargins(20, 20, 20, 16);
+    auto *favoriteTitle = plainLabel(QStringLiteral("libraryFavoritesTitle"), favoritePage);
+    favoriteTitle->setText(QStringLiteral("喜欢"));
+    favoriteTitle->setProperty("sectionTitle", true);
+    favoriteLayout->addWidget(favoriteTitle);
+    m_favoritesView = new FavoriteTracksView(favoritePage);
+    m_favoritesView->setWorkCoverProvider([this](qint64 id) { return m_worksModel->coverIcon(id); });
+    connect(m_worksModel, &QAbstractItemModel::modelReset, m_favoritesView->viewport(),
+            qOverload<>(&QWidget::update));
+    favoriteLayout->addWidget(m_favoritesView, 1);
+    m_favoritesView->hide();
+    m_favoritesEmptyLabel = plainLabel(QStringLiteral("libraryFavoritesEmptyLabel"), favoritePage);
+    m_favoritesEmptyLabel->setText(QStringLiteral("点击播放条上的爱心，把音轨加入喜欢。"));
+    m_favoritesEmptyLabel->setProperty("subtleLabel", true);
+    m_favoritesEmptyLabel->setAlignment(Qt::AlignCenter);
+    favoriteLayout->addWidget(m_favoritesEmptyLabel, 1);
+    m_browsePages->addWidget(favoritePage);
+    connect(m_favoritesView, &FavoriteTracksView::playRequested, this, &LibraryPanel::favoriteTrackPlayRequested);
+    connect(m_favoritesView, &FavoriteTracksView::removalRequested, this, &LibraryPanel::favoriteTrackRemovalRequested);
+    auto *favoriteScroll = m_favoritesView->verticalScrollBar();
+    const auto scheduleFavoriteDemand = [this] {
+        scheduleTrackDurationDemand();
+        scheduleWorkCoverDemand();
+    };
+    connect(favoriteScroll, &QScrollBar::valueChanged, this, scheduleFavoriteDemand);
+    connect(favoriteScroll, &QScrollBar::rangeChanged, this, scheduleFavoriteDemand);
     splitter->setStretchFactor(0, 0);
     splitter->setStretchFactor(1, 1);
     splitter->setSizes({240, 720});
@@ -1286,16 +1380,19 @@ LibraryPanel::LibraryPanel(QWidget *parent)
     layout->addWidget(splitter, 1);
 
     setFocusPolicy(Qt::StrongFocus);
-    setFocusProxy(m_importMenuButton);
-    setTabOrder(m_importMenuButton, m_refreshScanRootsButton);
+    setFocusProxy(m_favoritesButton);
+    setTabOrder(m_favoritesButton, m_refreshScanRootsButton);
     setTabOrder(m_refreshScanRootsButton, m_cancelButton);
     setTabOrder(m_cancelButton, m_workSearchEdit);
     setTabOrder(m_workSearchEdit, m_worksView);
     setTabOrder(m_worksView, m_navigateUpButton);
     setTabOrder(m_navigateUpButton, m_breadcrumbRootButton);
     setTabOrder(m_breadcrumbRootButton, m_tracksView);
-    setTabOrder(m_tracksView, m_aiSubtitlesButton);
-    setTabOrder(m_aiSubtitlesButton, m_settingsButton);
+    setTabOrder(m_tracksView, m_favoritesView);
+    setTabOrder(m_favoritesView, m_settingsButton);
+    setTabOrder(m_settingsButton, m_aiSubtitlesButton);
+    setTabOrder(m_aiSubtitlesButton, m_mobilePlaybackButton);
+    setTabOrder(m_mobilePlaybackButton, m_importMenuButton);
     setTabOrder(m_worksView, m_playDirectoryButton);
     setTabOrder(m_playDirectoryButton, m_navigateUpButton);
     setTabOrder(m_worksView, m_coverMenuButton);
@@ -1389,37 +1486,17 @@ LibraryPanel::LibraryPanel(QWidget *parent)
     connect(m_workSearchEdit, &QLineEdit::textChanged, this, [this](const QString &text) {
         if (m_closing) return;
         invalidateWorkContextMenu();
-        // Refitting the list must not select another work when its current row disappears.
-        const QSignalBlocker blocker(m_worksView->selectionModel());
         m_worksFilter->setSearchText(text);
         restoreVisibleWorkSelection();
         updatePresentation();
     });
-    connect(m_worksView->selectionModel(), &QItemSelectionModel::currentChanged,
-            this, [this](const QModelIndex &current) {
-        const qint64 workId = current.data(WorkIdRole).toLongLong();
-        if (m_selectedWorkId == workId)
-            return;
-        rememberBrowseState();
-        setTrackBatchMode(false);
-        ++m_browseRevision;
-        m_selectedWorkId = workId;
-        // Do not briefly present the preceding work's files under a new selection.
-        m_displayedWorkId = 0;
-        m_currentDirectory.clear();
-        m_tracksView->setRootIndex({});
-        m_tracksModel->setFiles(0, {});
-        m_browseTitleLabel->setText(current.data(Qt::DisplayRole).toString());
-        m_browseTitleLabel->setToolTip(current.data(Qt::ToolTipRole).toString());
-        updateBrowsedCover();
-        rebuildBreadcrumbs();
-        updatePresentation();
-        scheduleWorkCoverDemand();
-        emit workSelected(workId);
-    });
+    connect(m_worksView, &QListView::clicked, this, &LibraryPanel::openSidebarWork);
     // activated can follow a platform style that activates on a single click.
     // Explicit gestures keep selection separate from playback on every style.
-    connect(m_tracksView, &QTableView::doubleClicked, this, &LibraryPanel::activateItem);
+    connect(m_tracksView, &QTableView::doubleClicked, this, [this](const QModelIndex &index) {
+        if (index.column() != LibraryTrackTreeModel::FavoriteColumn || index.data(DirectoryRole).toBool())
+            activateItem(index);
+    });
     // Installing filters after every control exists prevents layout/style
     // events during construction from observing a partially built workspace.
     m_worksView->installEventFilter(this);
@@ -1432,7 +1509,10 @@ LibraryPanel::LibraryPanel(QWidget *parent)
     m_breadcrumbOverflowButton->installEventFilter(this);
     m_tracksView->installEventFilter(this);
     m_tracksView->viewport()->installEventFilter(this);
+    m_favoritesView->viewport()->installEventFilter(this);
     welcomePage->installEventFilter(this);
+    importMenu->installEventFilter(this);
+    footer->installEventFilter(this);
     sidebar->installEventFilter(this);
     installEventFilter(this);
     updatePresentation();
@@ -1440,6 +1520,21 @@ LibraryPanel::LibraryPanel(QWidget *parent)
 
 bool LibraryPanel::eventFilter(QObject *watched, QEvent *event)
 {
+    if (event->type() == QEvent::Show && watched == m_importMenuButton->menu()) {
+        auto *menu = m_importMenuButton->menu();
+        const int top = m_importMenuButton->mapToGlobal(QPoint()).y() - menu->height();
+        if (top >= m_importMenuButton->screen()->availableGeometry().top())
+            menu->move(menu->x(), top);
+    }
+    if (event->type() == QEvent::Resize && watched == m_importMenuButton->parentWidget()) {
+        auto *footer = m_importMenuButton->parentWidget();
+        auto *layout = footer->layout();
+        const int count = layout->count();
+        const int buttonWidth = std::min(36, footer->width() / count);
+        layout->setSpacing(std::clamp((footer->width() - count * buttonWidth) / (count - 1), 0, 8));
+        for (int i = 0; i < count; ++i)
+            layout->itemAt(i)->widget()->setFixedWidth(buttonWidth);
+    }
     if (watched == m_categoriesView->viewport()
         && (event->type() == QEvent::Resize || event->type() == QEvent::Show
             || event->type() == QEvent::Hide)) scheduleWorkCoverDemand();
@@ -1496,17 +1591,17 @@ bool LibraryPanel::eventFilter(QObject *watched, QEvent *event)
             return true;
         }
     }
-    if ((watched == this || (m_tracksView
+    if ((watched == this || (m_favoritesView && watched == m_favoritesView->viewport()) || (m_tracksView
             && (watched == m_tracksView || watched == m_tracksView->viewport())))
         && (event->type() == QEvent::Show || event->type() == QEvent::Hide
             || event->type() == QEvent::Resize || event->type() == QEvent::LayoutRequest))
         scheduleTrackDurationDemand();
-    if ((watched == this || (m_worksView
+    if ((watched == this || (m_favoritesView && watched == m_favoritesView->viewport()) || (m_worksView
             && (watched == m_worksView || watched == m_worksView->viewport())))
         && (event->type() == QEvent::Show || event->type() == QEvent::Hide
             || event->type() == QEvent::Resize || event->type() == QEvent::LayoutRequest))
         scheduleWorkCoverDemand();
-    if (watched->objectName() == QStringLiteral("libraryTracksPane")
+    if (watched->objectName() == QStringLiteral("libraryDirectoryPage")
         && (event->type() == QEvent::Resize || event->type() == QEvent::Show
             || event->type() == QEvent::StyleChange || event->type() == QEvent::FontChange))
         updateWorkHeaderGeometry();
@@ -1534,8 +1629,7 @@ bool LibraryPanel::eventFilter(QObject *watched, QEvent *event)
                 actions->setDirection(compact ? QBoxLayout::LeftToRight : QBoxLayout::TopToBottom);
                 actions->setSpacing(compact ? 4 : 12);
             }
-            for (auto *button : {m_importMenuButton, m_aiSubtitlesButton, m_settingsButton,
-                                 m_refreshScanRootsButton, m_cancelButton}) {
+            for (auto *button : {m_favoritesButton, m_refreshScanRootsButton, m_cancelButton}) {
                 const bool wasCompact = button->property("libraryRegularStyleSheet").isValid();
                 if (compact && !wasCompact) {
                     button->setProperty("libraryRegularStyleSheet", button->styleSheet());
@@ -1577,6 +1671,11 @@ bool LibraryPanel::eventFilter(QObject *watched, QEvent *event)
     }
     if (watched == m_worksView && event->type() == QEvent::KeyPress) {
         const auto *keyEvent = static_cast<QKeyEvent *>(event);
+        if ((keyEvent->key() == Qt::Key_Return || keyEvent->key() == Qt::Key_Enter)
+            && (keyEvent->modifiers() == Qt::NoModifier || keyEvent->modifiers() == Qt::KeypadModifier)) {
+            if (!keyEvent->isAutoRepeat()) openSidebarWork(m_worksView->currentIndex());
+            return true;
+        }
         if ((keyEvent->key() == Qt::Key_Menu && keyEvent->modifiers() == Qt::NoModifier)
             || (keyEvent->key() == Qt::Key_F10 && keyEvent->modifiers() == Qt::ShiftModifier)) {
             if (!keyEvent->isAutoRepeat()) {
@@ -1587,12 +1686,13 @@ bool LibraryPanel::eventFilter(QObject *watched, QEvent *event)
             return true;
         }
     }
-    if (m_trackBatchMode && watched == m_tracksView->viewport()
+    if (m_tracksView && watched == m_tracksView->viewport()
         && (event->type() == QEvent::MouseButtonPress || event->type() == QEvent::MouseButtonRelease
             || event->type() == QEvent::MouseButtonDblClick)) {
-        const auto *mouse = static_cast<QMouseEvent *>(event);
+        auto *mouse = static_cast<QMouseEvent *>(event);
+        if (!m_trackBatchMode && handleDirectoryFavoriteMouse(mouse)) return true;
         const auto index = m_tracksView->indexAt(mouse->position().toPoint()).siblingAtColumn(0);
-        if (mouse->button() == Qt::LeftButton && isCurrentPageIndex(index)
+        if (m_trackBatchMode && mouse->button() == Qt::LeftButton && isCurrentPageIndex(index)
             && !index.data(DirectoryRole).toBool()) {
             if (event->type() == QEvent::MouseButtonPress) {
                 m_tracksView->setFocus(Qt::MouseFocusReason);
@@ -1664,9 +1764,9 @@ bool LibraryPanel::eventFilter(QObject *watched, QEvent *event)
     return QWidget::eventFilter(watched, event);
 }
 
-QPoint LibraryPanel::importIconCenter() const
+QPoint LibraryPanel::favoritesIconCenter() const
 {
-    const auto *button = static_cast<const SidebarButton *>(m_importMenuButton);
+    const auto *button = static_cast<const SidebarButton *>(m_favoritesButton);
     return button ? button->mapTo(this, button->iconCenter()) : QPoint();
 }
 
@@ -1719,6 +1819,8 @@ void LibraryPanel::setApplicationTitleVisible(bool visible)
 
 bool LibraryPanel::isTrackViewTarget(const QWidget *widget) const
 {
+    if (m_browsePages->currentIndex() == 1)
+        return widget && (widget == m_favoritesView || widget == m_favoritesView->viewport());
     return !m_trackBatchMode && widget && (widget == m_tracksView || widget == m_tracksView->viewport());
 }
 
@@ -1727,6 +1829,73 @@ bool LibraryPanel::isCurrentPageIndex(const QModelIndex &index) const
     return !m_closing && m_displayedWorkId > 0 && m_displayedWorkId == m_selectedWorkId
         && m_tracksView->isEnabled() && index.isValid() && index.model() == m_tracksModel
         && index.parent() == m_tracksView->rootIndex();
+}
+
+bool LibraryPanel::handleDirectoryFavoriteMouse(QMouseEvent *event)
+{
+    if (event->button() != Qt::LeftButton) return false;
+    const QPoint position = event->position().toPoint();
+    const QModelIndex index = m_tracksView->indexAt(position);
+    const bool heartCell = index.column() == LibraryTrackTreeModel::FavoriteColumn
+        && index.data(LibraryTrackTreeModel::FavoriteRole).isValid();
+    if (event->type() == QEvent::MouseButtonRelease) {
+        const auto pressed = std::exchange(m_pressedFavorite, QPersistentModelIndex());
+        if (heartCell && index == pressed) toggleDirectoryFavorite(index, position);
+        return heartCell || pressed.isValid();
+    }
+    m_pressedFavorite = QModelIndex();
+    if (!heartCell) return false;
+    if (event->type() == QEvent::MouseButtonDblClick) return true;
+    // Changing focus to the confirmation and back can split one native double
+    // click into two ordinary clicks. Ignore its tail after a confirmed removal.
+    const auto *hints = QApplication::styleHints();
+    const QPoint delta = position - m_lastFavoritePosition;
+    if (m_lastFavoriteConfirmation.isValid()
+        && m_lastFavoriteConfirmation.elapsed() <= hints->mouseDoubleClickInterval()
+        && qAbs(delta.x()) <= hints->mouseDoubleClickDistance()
+        && qAbs(delta.y()) <= hints->mouseDoubleClickDistance())
+        return true;
+    if (isCurrentPageIndex(index)) m_pressedFavorite = index;
+    return true;
+}
+
+void LibraryPanel::toggleDirectoryFavorite(const QModelIndex &index, const QPoint &position)
+{
+    if (!canRequestQueuePlayback() || !isCurrentPageIndex(index) || !m_tracksView->isVisible()
+        || m_trackBatchMode || m_directoryFavoriteConfirmation) return;
+    const auto favorite = index.data(LibraryTrackTreeModel::FavoriteRole);
+    if (!favorite.isValid()) return;
+    const qint64 fileId = index.data(FileIdRole).toLongLong();
+    const qint64 workId = index.data(WorkIdRole).toLongLong();
+    if (!favorite.toBool()) {
+        if (!index.data(MissingRole).toBool())
+            emit directoryTrackFavoriteRequested(workId, fileId, true);
+        return;
+    }
+    auto *dialog = makeFavoriteRemovalConfirmation(m_tracksView, m_browseTitleLabel->text(),
+        index.data(RelativePathRole).toString());
+    m_directoryFavoriteConfirmation = dialog;
+    const auto stillFavorite = [this, workId, fileId] {
+        const auto target = m_tracksModel->indexForFileId(fileId).siblingAtColumn(LibraryTrackTreeModel::FavoriteColumn);
+        return canRequestQueuePlayback() && workId == m_displayedWorkId && !m_trackBatchMode
+            && m_tracksView->isVisible() && isCurrentPageIndex(target)
+            && target.data(LibraryTrackTreeModel::FavoriteRole).toBool();
+    };
+    const auto checkTarget = [dialog, stillFavorite] {
+        if (dialog->isVisible() && !stillFavorite()) dialog->reject();
+    };
+    connect(m_tracksModel, &QAbstractItemModel::modelReset, dialog, checkTarget);
+    connect(m_tracksModel, &QAbstractItemModel::dataChanged, dialog, checkTarget);
+    connect(dialog, &QDialog::finished, this, [this, dialog, workId, fileId, position, stillFavorite] {
+        if (m_directoryFavoriteConfirmation != dialog) return;
+        m_directoryFavoriteConfirmation.clear();
+        if (!dialog->clickedButton() || dialog->buttonRole(dialog->clickedButton()) != QMessageBox::DestructiveRole
+            || !stillFavorite()) return;
+        m_lastFavoritePosition = position;
+        m_lastFavoriteConfirmation.start();
+        emit directoryTrackFavoriteRequested(workId, fileId, false);
+    });
+    dialog->open();
 }
 
 void LibraryPanel::activateItem(const QModelIndex &index)
@@ -1865,7 +2034,6 @@ QVector<qint64> LibraryPanel::categoryWorkIds(qint64 categoryId) const
 
 void LibraryPanel::updateCategoryFilter(bool resetSearch)
 {
-    const QSignalBlocker blocker(m_worksView->selectionModel());
     if (resetSearch) {
         const QSignalBlocker searchBlocker(m_workSearchEdit);
         m_workSearchEdit->clear();
@@ -1952,6 +2120,67 @@ void LibraryPanel::setCategories(const QVector<WorkCategory> &categories,
     scheduleWorkCoverDemand();
 }
 
+void LibraryPanel::showFavorites(bool show)
+{
+    if (m_closing) return;
+    m_favoritesButton->setChecked(show);
+    if (show)
+        m_worksView->selectionModel()->clear();
+    const int page = show ? 1 : 0;
+    if (m_browsePages->currentIndex() == page) return;
+    m_browsePages->setCurrentIndex(page);
+    scheduleWorkCoverDemand();
+    scheduleTrackDurationDemand(true);
+}
+
+void LibraryPanel::openSidebarWork(const QModelIndex &index)
+{
+    const qint64 workId = index.data(WorkIdRole).toLongLong();
+    if (m_closing || workId <= 0) return;
+    m_worksView->selectionModel()->setCurrentIndex(index, QItemSelectionModel::ClearAndSelect);
+    showFavorites(false);
+    if (m_selectedWorkId == workId) return;
+
+    rememberBrowseState();
+    setTrackBatchMode(false);
+    ++m_browseRevision;
+    m_selectedWorkId = workId;
+    // Clear the preceding work's files while the new snapshot loads.
+    m_displayedWorkId = 0;
+    m_currentDirectory.clear();
+    m_tracksView->setRootIndex({});
+    m_tracksModel->setFiles(0, {});
+    m_browseTitleLabel->setText(index.data(Qt::DisplayRole).toString());
+    m_browseTitleLabel->setToolTip(index.data(Qt::ToolTipRole).toString());
+    updateBrowsedCover();
+    rebuildBreadcrumbs();
+    updatePresentation();
+    scheduleWorkCoverDemand();
+    emit workSelected(workId);
+}
+
+bool LibraryPanel::showingFavorites() const
+{
+    return m_browsePages->currentIndex() == 1;
+}
+
+void LibraryPanel::setFavoriteTracks(const QVector<LibraryFavoriteTrack> &tracks)
+{
+    QSet<qint64> ids;
+    ids.reserve(tracks.size());
+    for (const auto &track : tracks)
+        ids.insert(track.file.id);
+    m_tracksModel->setFavoriteFileIds(ids);
+    m_favoritesView->setTracks(tracks);
+    m_favoritesButton->setText(QStringLiteral("喜欢 · %1").arg(tracks.size()));
+    m_favoritesView->setVisible(!tracks.isEmpty());
+    m_favoritesEmptyLabel->setVisible(tracks.isEmpty());
+    if (showingFavorites()) {
+        scheduleTrackDurationDemand(true);
+        scheduleWorkCoverDemand();
+    }
+}
+
 void LibraryPanel::setCategoryMutationBusy(bool busy)
 {
     if (m_categoryMutationBusy == busy) return;
@@ -2018,6 +2247,8 @@ void LibraryPanel::setTrackBatchMode(bool enabled)
     m_trackMenuContext = {};
     m_translationMenuIds.clear();
     m_tracksView->setProperty("trackBatchMode", enabled);
+    m_tracksView->setColumnHidden(LibraryTrackTreeModel::FavoriteColumn, enabled);
+    m_pressedFavorite = QModelIndex();
     m_tracksModel->setBatchSelectionEnabled(enabled);
     m_tracksView->setSelectionMode(enabled ? QAbstractItemView::SingleSelection
                                          : QAbstractItemView::ExtendedSelection);
@@ -2354,7 +2585,6 @@ void LibraryPanel::setLibrary(const QVector<LibraryWork> &works,
             m_tracksModel->clearWorkDurations(work.id);
         }
     }
-    const QSignalBlocker blocker(m_worksView->selectionModel());
     m_worksModel->setWorks(works);
     m_worksFilter->setMembers(m_categoryMode && m_currentCategoryId > 0, categoryWorkIds(m_currentCategoryId));
     const int selectedRow = m_worksModel->rowForId(selectedWorkId);
@@ -2440,7 +2670,7 @@ void LibraryPanel::restoreBrowseState()
 
 void LibraryPanel::restoreVisibleWorkSelection()
 {
-    const int sourceRow = m_worksModel->rowForId(m_selectedWorkId);
+    const int sourceRow = showingFavorites() ? -1 : m_worksModel->rowForId(m_selectedWorkId);
     const auto visible = sourceRow < 0 ? QModelIndex()
         : m_worksFilter->mapFromSource(m_worksModel->index(sourceRow));
     if (visible.isValid()) {
@@ -2547,20 +2777,28 @@ void LibraryPanel::setManualCoverAvailable(qint64 workId, bool manual)
 
 void LibraryPanel::setWorkCover(qint64 workId, const CoverArtResult &result)
 {
-    if (m_closing || workId <= 0 || m_worksModel->rowForId(workId) < 0)
-        return;
-    const auto index = m_worksFilter->mapFromSource(m_worksModel->index(m_worksModel->rowForId(workId)));
-    const bool visible = index.isValid() && m_worksView->isVisible()
-        && m_worksView->visualRect(index).intersects(m_worksView->viewport()->rect());
-    if (workId != m_selectedWorkId && !visible)
-        return;
+    if (m_closing || workId <= 0) return;
+    const int row = m_worksModel->rowForId(workId);
+    if (row < 0) return;
+    // A cover can arrive between a selection/scroll change and the coalesced
+    // demand update. Accept the published demand as well as newly visible rows.
+    if (workId != m_selectedWorkId && workId != m_lastCoverDemandSelected
+        && !m_lastCoverDemandVisible.contains(workId)) {
+        const auto index = m_worksFilter->mapFromSource(m_worksModel->index(row));
+        const bool visibleInSidebar = m_worksView->isVisible() && index.isValid()
+            && m_worksView->visualRect(index).intersects(m_worksView->viewport()->rect());
+        if (!visibleInSidebar && !m_favoritesView->visibleWorkIds().contains(workId))
+            return;
+    }
     m_worksModel->setCover(workId, result);
+    m_favoritesView->refreshWorkCover(workId);
     if (workId == m_selectedWorkId) updateBrowsedCover();
 }
 
 void LibraryPanel::clearWorkCover(qint64 workId)
 {
     m_worksModel->clearCover(workId);
+    m_favoritesView->refreshWorkCover(workId);
     if (workId == m_selectedWorkId) updateBrowsedCover();
 }
 
@@ -2594,12 +2832,15 @@ void LibraryPanel::requestTrackDurationDemand()
 void LibraryPanel::setTrackDuration(qint64 workId, qint64 fileId,
                                    std::optional<qint64> milliseconds)
 {
-    if (!m_closing) m_tracksModel->setTrackDuration(workId, fileId, milliseconds);
+    if (m_closing) return;
+    m_tracksModel->setTrackDuration(workId, fileId, milliseconds);
+    m_favoritesView->setTrackDuration(workId, fileId, milliseconds);
 }
 
 void LibraryPanel::clearTrackDurations(qint64 workId)
 {
     m_tracksModel->clearWorkDurations(workId);
+    m_favoritesView->clearWorkDurations(workId);
 }
 
 void LibraryPanel::setSubtitleTracks(qint64 workId, const QSet<qint64> &audioFileIds)
@@ -2616,6 +2857,18 @@ void LibraryPanel::scheduleTrackDurationDemand(bool force)
 
 void LibraryPanel::publishTrackDurationDemand()
 {
+    const bool force = std::exchange(m_forceDurationDemand, false);
+    if (m_browsePages->currentIndex() == 1) {
+        const QVector<qint64> visible = m_closing ? QVector<qint64>() : m_favoritesView->visibleAudioFileIds();
+        // Work IDs are positive. A separate scope keeps transitions between empty pages observable.
+        constexpr qint64 favoriteScope = -2;
+        if (force || m_lastDurationDemandWork != favoriteScope || m_lastDurationDemandVisible != visible) {
+            m_lastDurationDemandWork = favoriteScope;
+            m_lastDurationDemandVisible = visible;
+            emit favoriteDurationDemandChanged(visible);
+        }
+        return;
+    }
     QVector<qint64> visible;
     const bool available = !m_closing && !m_querying && m_displayedWorkId > 0
         && m_displayedWorkId == m_selectedWorkId && m_tracksView->isVisible();
@@ -2637,7 +2890,6 @@ void LibraryPanel::publishTrackDurationDemand()
                 visible.append(id);
         }
     }
-    const bool force = std::exchange(m_forceDurationDemand, false);
     if (!force && workId == m_lastDurationDemandWork && visible == m_lastDurationDemandVisible)
         return;
     m_lastDurationDemandWork = workId;
@@ -2673,6 +2925,14 @@ void LibraryPanel::publishWorkCoverDemand()
     }
     const qint64 selected = m_closing ? 0 : m_selectedWorkId;
     QSet<qint64> wanted(visible.cbegin(), visible.cend());
+    if (!m_closing && showingFavorites()) {
+        for (const qint64 id : m_favoritesView->visibleWorkIds()) {
+            if (!wanted.contains(id)) {
+                wanted.insert(id);
+                visible.append(id);
+            }
+        }
+    }
     if (selected > 0) wanted.insert(selected);
     m_worksModel->retainCovers(wanted);
     const bool changed = selected != m_lastCoverDemandSelected || visible != m_lastCoverDemandVisible;
@@ -2842,8 +3102,11 @@ void LibraryPanel::updatePresentation()
 {
     const bool importEnabled = m_importAvailable && !m_active && !m_closing;
     m_importMenuButton->setEnabled(!m_closing);
+    m_favoritesButton->setEnabled(!m_closing);
+    m_favoritesView->setEnabled(!m_closing);
     m_aiSubtitlesButton->setEnabled(!m_closing);
     m_settingsButton->setEnabled(!m_closing);
+    m_mobilePlaybackButton->setEnabled(!m_closing);
     m_importAction->setEnabled(importEnabled);
     m_welcomeImportButton->setEnabled(importEnabled);
     m_addScanRootAction->setEnabled(importEnabled);
@@ -2952,9 +3215,8 @@ void LibraryPanel::updatePresentation()
         m_tracksEmptyLabel->setText(QStringLiteral("这部作品暂时没有音轨记录。"));
     }
     updateWelcomeGeometry();
-    auto *sidebar = m_importMenuButton->parentWidget();
-    const bool compact = sidebar->property("compactLibrarySidebar").toBool();
-    sidebar->findChild<QLabel *>(QStringLiteral("applicationTitle"))->setVisible(m_applicationTitleVisible);
+    const bool compact = m_sidebar->property("compactLibrarySidebar").toBool();
+    m_sidebar->findChild<QLabel *>(QStringLiteral("applicationTitle"))->setVisible(m_applicationTitleVisible);
     m_workCountLabel->setVisible(true);
     const QString cancelName = m_workRemovalActive ? QStringLiteral("取消删除")
         : m_batchImportMode ? QStringLiteral("停止批次") : QStringLiteral("取消扫描");

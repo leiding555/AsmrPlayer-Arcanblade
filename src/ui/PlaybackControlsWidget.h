@@ -31,6 +31,7 @@ public:
     void setSubtitleSelectionAvailable(bool available);
     void setSubtitlePanelVisible(bool visible);
     void setFloatingSubtitleVisible(bool visible);
+    void setFavoriteState(bool available, bool liked);
     void setQueueNavigationAvailable(bool previous, bool next);
     void setQueueState(int count, bool visible);
     void setMediaAvailable(bool available);
@@ -47,6 +48,7 @@ signals:
     void seekRequested(qint64 positionMs);
     void volumeChangeRequested(int volume);
     void playbackModeRequested(asmr::PlaybackMode mode);
+    void favoriteToggleRequested();
     void selectSubtitleRequested();
     void toggleSubtitlePanelRequested();
     void toggleFloatingSubtitleRequested();
@@ -78,6 +80,7 @@ private:
     QPushButton *m_coverButton = nullptr;
     QLabel *m_workNameLabel = nullptr;
     QPushButton *m_playPauseButton = nullptr;
+    QPushButton *m_favoriteButton = nullptr;
     QPushButton *m_playbackModeButton = nullptr;
     QPushButton *m_volumeButton = nullptr;
     QPushButton *m_muteButton = nullptr;
@@ -108,7 +111,7 @@ private:
     bool m_subtitlePanelVisible = false;
     bool m_seekable = false;
     bool m_resumePending = false;
-    int m_barLayoutMode = 2;
+    int m_barLayoutMode = -1;
     // Validity of this UI drag only, not another playback state machine.
     bool m_userSeeking = false;
 };

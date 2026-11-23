@@ -310,7 +310,7 @@ BoundSubtitleDialog::BoundSubtitleDialog(QWidget *parent)
     m_preferenceLabel->setWordWrap(true);
     m_restoreButton = new QPushButton(QStringLiteral("恢复默认"), this);
     m_restoreButton->setObjectName(QStringLiteral("automaticBoundSubtitleButton"));
-    m_restoreButton->setToolTip(QStringLiteral("清除手动默认或禁用设置，自动使用最新可用的已关联字幕；不改变关联。"));
+    m_restoreButton->setToolTip(QStringLiteral("自动使用最新可用的已关联字幕。没有可用关联时，绑定并使用第一份可用的推荐字幕。"));
     m_contextMenu = new QMenu(this);
     m_contextMenu->setObjectName(QStringLiteral("boundSubtitleContextMenu"));
     m_contextMenu->setToolTipsVisible(true);
@@ -323,7 +323,7 @@ BoundSubtitleDialog::BoundSubtitleDialog(QWidget *parent)
     m_bindAction->setToolTip(QStringLiteral("确认为人工关联，不改变默认字幕。"));
     m_unbindAction = m_contextMenu->addAction(QStringLiteral("解除所选关联"));
     m_unbindAction->setObjectName(QStringLiteral("removeSubtitleBindingButton"));
-    m_unbindAction->setToolTip(QStringLiteral("立即解除关联；解除默认字幕时恢复自动选择。重新扫描可能再次自动关联。"));
+    m_unbindAction->setToolTip(QStringLiteral("解除当前音轨的关联。解除默认字幕后恢复自动选择；自动选择或重新扫描时可能再次关联。"));
     m_contextMenu->addSeparator();
     m_openFolderAction = m_contextMenu->addAction(QStringLiteral("打开所在文件夹"));
     m_openFolderAction->setObjectName(QStringLiteral("openSubtitleFolderAction"));

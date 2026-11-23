@@ -1,4 +1,5 @@
 #include "ui/LibraryTrackTreeModel.h"
+#include "ui/TimeFormat.h"
 #include "library/NaturalSort.h"
 #include <QBrush>
 #include <QColor>
@@ -37,7 +38,7 @@ QModelIndex LibraryTrackTreeModel::nodeIndex(const Node *entry, int column) cons
 }
 QModelIndex LibraryTrackTreeModel::index(int row, int column, const QModelIndex &parent) const
 {
-    if (row < 0 || column < 0 || column >= 3 || (parent.isValid() && parent.column() != 0)) return {};
+    if (row < 0 || column < 0 || column >= ColumnCount || (parent.isValid() && parent.column() != 0)) return {};
     const auto *owner = parent.isValid() ? node(parent) : m_root.get();
     if (!owner || row >= static_cast<int>(owner->children.size())) return {};
     return createIndex(row, column, owner->children[static_cast<size_t>(row)].get());
@@ -53,7 +54,7 @@ int LibraryTrackTreeModel::rowCount(const QModelIndex &parent) const
     const auto *owner = parent.isValid() ? node(parent) : m_root.get();
     return owner ? static_cast<int>(owner->children.size()) : 0;
 }
-int LibraryTrackTreeModel::columnCount(const QModelIndex &) const { return 3; }
+int LibraryTrackTreeModel::columnCount(const QModelIndex &) const { return ColumnCount; }
 Qt::ItemFlags LibraryTrackTreeModel::flags(const QModelIndex &index) const
 {
     const auto *entry = node(index);
@@ -67,6 +68,8 @@ Qt::ItemFlags LibraryTrackTreeModel::flags(const QModelIndex &index) const
 QVariant LibraryTrackTreeModel::headerData(int section, Qt::Orientation orientation, int role) const
 {
     if (orientation != Qt::Horizontal) return {};
+    if (section == FavoriteColumn && role == Qt::AccessibleTextRole)
+        return QStringLiteral("喜欢");
     if (role == Qt::TextAlignmentRole && section == 1)
         return QVariant::fromValue(Qt::AlignRight | Qt::AlignVCenter);
     if (role != Qt::DisplayRole) return {};
@@ -81,6 +84,16 @@ QVariant LibraryTrackTreeModel::data(const QModelIndex &index, int role) const
 {
     const auto *entry = node(index);
     if (!entry) return {};
+    if (index.column() == FavoriteColumn
+        && (role == FavoriteRole || role == Qt::ToolTipRole || role == Qt::AccessibleTextRole
+            || role == Qt::AccessibleDescriptionRole)) {
+        if (entry->directory || entry->file.id <= 0) return {};
+        const bool favorite = m_favoriteFileIds.contains(entry->file.id);
+        if (role == FavoriteRole) return favorite;
+        if (favorite) return QStringLiteral("取消喜欢");
+        if (entry->file.missing) return QStringLiteral("音轨缺失，无法加入喜欢");
+        return QStringLiteral("加入喜欢");
+    }
     const bool playing = !entry->directory && m_workId == m_playingWorkId
         && entry->file.id > 0 && entry->file.id == m_playingFileId;
     const bool subtitleAvailable = !entry->directory && !entry->file.missing
@@ -143,11 +156,7 @@ QVariant LibraryTrackTreeModel::data(const QModelIndex &index, int role) const
         if (entry->directory) return QString();
         const auto found = m_durations.constFind(entry->file.id);
         if (entry->file.missing || found == m_durations.cend()) return QStringLiteral("--:--");
-        const qint64 seconds = found.value() / 1000;
-        const QString tail = QStringLiteral("%1:%2").arg(seconds / 60 % 60)
-            .arg(seconds % 60, 2, 10, QLatin1Char('0'));
-        return seconds >= 3600 ? QStringLiteral("%1:%2").arg(seconds / 3600)
-            .arg(tail, 5, QLatin1Char('0')) : tail;
+        return formatTrackDuration(found.value());
     }
     case 2: return entry->path;
     default: return {};
@@ -284,7 +293,7 @@ void LibraryTrackTreeModel::setPlayingTrack(qint64 workId, qint64 fileId)
     const auto current = workId == m_workId ? indexForFileId(fileId) : QModelIndex();
     for (const auto &index : {previous, current}) {
         if (index.isValid())
-            emit dataChanged(index, index.siblingAtColumn(2),
+            emit dataChanged(index, index.siblingAtColumn(ColumnCount - 1),
                              {Qt::DisplayRole, Qt::AccessibleTextRole, Qt::ForegroundRole,
                               Qt::BackgroundRole, Qt::FontRole, PlayingRole});
     }
@@ -330,6 +339,18 @@ void LibraryTrackTreeModel::setSubtitleTracks(qint64 workId, const QSet<qint64> 
         const auto index = indexForFileId(id);
         if (index.isValid())
             emit dataChanged(index, index, {SubtitleAvailableRole, Qt::ToolTipRole,
+                Qt::AccessibleTextRole, Qt::AccessibleDescriptionRole});
+    }
+}
+void LibraryTrackTreeModel::setFavoriteFileIds(const QSet<qint64> &audioFileIds)
+{
+    if (audioFileIds == m_favoriteFileIds) return;
+    const auto changed = (audioFileIds - m_favoriteFileIds) | (m_favoriteFileIds - audioFileIds);
+    m_favoriteFileIds = audioFileIds;
+    for (const auto id : changed) {
+        const auto cell = nodeIndex(m_byId.value(id), FavoriteColumn);
+        if (cell.isValid())
+            emit dataChanged(cell, cell, {FavoriteRole, Qt::ToolTipRole,
                 Qt::AccessibleTextRole, Qt::AccessibleDescriptionRole});
     }
 }

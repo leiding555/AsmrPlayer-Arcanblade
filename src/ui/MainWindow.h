@@ -18,6 +18,7 @@
 #include <QQueue>
 #include <QSet>
 #include <QMap>
+#include <QThreadPool>
 #include <QPointer>
 #include <QWidget>
 
@@ -51,6 +52,7 @@ class LibraryPanel;
 class BoundSubtitleDialog;
 class ChickenRiceTranslateDialog;
 struct UpdateDownloadResult;
+struct UpdateInstallPreparation;
 struct GpuDetectionResult;
 struct AiSubtitleTaskResult;
 class BatchImportPreviewDialog;
@@ -63,6 +65,7 @@ class MobilePlaybackDialog;
 class PlaybackQueuePanel;
 class TitleBarWidget;
 class WindowFrameController;
+class WindowCloseChoiceDialog;
 class CoverArtService;
 class WorkCoverService;
 class TrackDurationService;
@@ -88,6 +91,9 @@ public:
     // Optional application-owned diagnostics; install before opening media.
     // Explicit database constructors remain isolated from production logs.
     void setPlaybackDiagnosticLog(PlaybackDiagnosticLog *log);
+
+signals:
+    void shutdownFinished();
 
 protected:
     void closeEvent(QCloseEvent *event) override;
@@ -120,6 +126,7 @@ private:
 
     [[nodiscard]] QString updateRestartBlockedReason() const;
     void restartForUpdate(const UpdateDownloadResult &result);
+    void finishUpdatePreparation(const UpdateInstallPreparation &preparation);
     bool m_updateInstallPreparing = false;
     std::shared_ptr<std::atomic_bool> m_updateInstallCancelled;
     std::shared_ptr<const std::function<void()>> m_beforeUpdatePrepareTestHook;
@@ -407,6 +414,14 @@ private:
     void refreshLibrary(qint64 preferredWorkId = 0);
     void startLibraryQuery();
     void connectWorkCategories();
+    void connectFavoriteTracks();
+    void updateFavoriteButton();
+    void applyFavoriteTracks(QVector<LibraryFavoriteTrack> tracks);
+    void writeTrackFavorite(qint64 workId, qint64 fileId, bool liked);
+    void playFavoriteTrack(qint64 fileId);
+    QVector<LibraryFavoriteTrack> m_favoriteTracks;
+    QSet<qint64> m_pendingFavoriteFiles;
+    QThreadPool m_libraryBrowsePool;
     void showCategoryNameEditor(qint64 categoryId = 0, qint64 addWorkId = 0);
     void requestCategoryRemoval(qint64 categoryId);
     void requestWorkCategory(qint64 workId, qint64 categoryId, bool present);
@@ -446,6 +461,10 @@ private:
     bool m_subtitleBadgeQueryInProgress = false;
     bool m_subtitleBadgeQueryPending = false;
     void finishCloseIfReady();
+    void beginShutdown();
+    void createCloseBehaviorMenu();
+    void showCloseChoiceDialog();
+    bool canHideToTray() const;
     void createSystemTray();
     void configureTabOrder();
     void showAudioDeviceSettings();
@@ -647,6 +666,9 @@ private:
     QAction *m_lockFloatingAction = nullptr;
     QAction *m_floatingAppearanceAction = nullptr;
     QAction *m_restoreMainWindowAction = nullptr;
+    QAction *m_exitOnCloseAction = nullptr;
+    QAction *m_hideOnCloseAction = nullptr;
+    QPointer<WindowCloseChoiceDialog> m_closeChoiceDialog;
     QSystemTrayIcon *m_systemTrayIcon = nullptr;
 };
 

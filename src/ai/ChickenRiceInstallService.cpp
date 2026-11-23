@@ -97,15 +97,19 @@ QJsonObject readRecord(const QString &path)
         return {};
     return QJsonDocument::fromJson(file.readAll()).object();
 }
-bool writeRecord(const QString &path, const QString &fingerprint, QString *error)
+bool writeRecord(const QString &path, const QString &fingerprint, QString *error,
+                 std::optional<ChickenRicePurpose> purpose = std::nullopt)
 {
     QSaveFile file(path);
     if (!file.open(QIODevice::WriteOnly)) {
         *error = file.errorString();
         return false;
     }
-    const QByteArray data = QJsonDocument(QJsonObject{{QStringLiteral("owner"), Owner},
-        {QStringLiteral("fingerprint"), fingerprint}}).toJson(QJsonDocument::Compact);
+    QJsonObject record{{QStringLiteral("owner"), Owner}, {QStringLiteral("fingerprint"), fingerprint}};
+    if (purpose)
+        record.insert(QStringLiteral("purpose"), *purpose == ChickenRicePurpose::Transcribe
+            ? QStringLiteral("transcribe") : QStringLiteral("translate"));
+    const QByteArray data = QJsonDocument(record).toJson(QJsonDocument::Compact);
     if (file.write(data) != data.size() || !file.commit()) {
         *error = file.errorString();
         return false;
@@ -476,7 +480,9 @@ Result installPackage(const Request &request, const std::atomic_bool &cancelled,
         || !writeRecord(directory.filePath(RootRecord), QStringLiteral("root"), &error)) {
         return failure(QStringLiteral("Could not initialize installation root: %1").arg(error), cancelled);
     }
-    const QString key = request.package.version + QLatin1Char('-') + chickenRiceVariantKey(request.package.variant);
+    QString key = request.package.version + QLatin1Char('-') + chickenRiceVariantKey(request.package.variant);
+    if (request.package.purpose == ChickenRicePurpose::Transcribe)
+        key += QStringLiteral("-transcribe");
     static const QRegularExpression safeKey(QStringLiteral("^[A-Za-z0-9._-]+$"));
     if (!safeKey.match(key).hasMatch())
         return failure(QStringLiteral("Invalid package destination key."), cancelled);
@@ -500,7 +506,7 @@ Result installPackage(const Request &request, const std::atomic_bool &cancelled,
     const QString archivePath = QDir(cache).filePath(QStringLiteral("archive.zip.part"));
     if (QFileInfo::exists(destination)) {
         if (!safeAncestors(destination) || !recordMatches(QDir(destination).filePath(InstallRecord), id)
-            || !validateChickenRiceEngine(destination, &error))
+            || !validateChickenRiceEngine(destination, &error, request.package.purpose))
             return failure(QStringLiteral("An existing installation will not be overwritten: %1").arg(error), cancelled);
         if (cancelled.load())
             return failure({}, cancelled);
@@ -627,7 +633,7 @@ Result installPackage(const Request &request, const std::atomic_bool &cancelled,
     QString engine;
     if (error.isEmpty()) {
         engine = findChickenRiceEngineRoot(stage, &error);
-        if (!engine.isEmpty() && !validateChickenRiceEngine(engine, &error))
+        if (!engine.isEmpty() && !validateChickenRiceEngine(engine, &error, request.package.purpose))
             engine.clear();
     }
     if (cancelled.load() || !error.isEmpty() || engine.isEmpty()) {
@@ -637,7 +643,7 @@ Result installPackage(const Request &request, const std::atomic_bool &cancelled,
             result.warnings.append(QStringLiteral("Private staging could not be removed: %1").arg(stage));
         return result;
     }
-    if (!writeRecord(QDir(engine).filePath(InstallRecord), id, &error)) {
+    if (!writeRecord(QDir(engine).filePath(InstallRecord), id, &error, request.package.purpose)) {
         removeOwnedStage(root, stage, id);
         return failure(error, cancelled);
     }

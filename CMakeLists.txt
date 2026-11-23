@@ -175,6 +175,7 @@ add_library(AsmrAiSubtitle STATIC
     src/ai/AiSubtitleProcess.h src/ai/AiSubtitleProcess.cpp
     src/ai/WindowsConsoleHostCache.h
     src/ai/AiSubtitleOutput.h src/ai/AiSubtitleOutput.cpp
+    src/ai/FasterWhisperRecoveryDiagnostics.h src/ai/FasterWhisperRecoveryDiagnostics.cpp
 )
 target_include_directories(AsmrAiSubtitle PUBLIC "${CMAKE_CURRENT_SOURCE_DIR}/src")
 target_link_libraries(AsmrAiSubtitle PUBLIC AsmrSubtitle Qt6::Core)
@@ -304,6 +305,7 @@ set(_library_subtitle_playback_sources
     src/ui/MainWindowArtwork.cpp
     src/ui/MainWindowWorkEditor.cpp
     src/ui/MainWindowCategories.cpp
+    src/ui/MainWindowFavorites.cpp
     src/ui/CategoryEditDialog.h src/ui/CategoryEditDialog.cpp
     src/ui/MainWindowWorkReferences.cpp
     src/ui/WorkReferenceDialog.h src/ui/WorkReferenceDialog.cpp
@@ -358,6 +360,8 @@ add_library(AsmrWindowFrame STATIC
     src/ui/WindowFrameController.cpp
     src/ui/DialogFrame.h
     src/ui/DialogFrame.cpp
+    src/ui/WindowCloseChoiceDialog.h
+    src/ui/WindowCloseChoiceDialog.cpp
     src/ui/PlayerMessageBox.h
     src/ui/PlayerMessageBox.cpp
 )
@@ -533,7 +537,9 @@ else()
     target_compile_options(AsmrPlayer PRIVATE -Wall -Wextra)
 endif()
 
-target_sources(AsmrPlayer PRIVATE src/ui/LibraryTrackTreeModel.h src/ui/LibraryTrackTreeModel.cpp)
+set(_library_browser_views src/ui/LibraryTrackTreeModel.h src/ui/LibraryTrackTreeModel.cpp
+    src/ui/FavoriteTracksView.h src/ui/FavoriteTracksView.cpp)
+target_sources(AsmrPlayer PRIVATE ${_library_browser_views})
 arcanblade_deploy_sevenzip(AsmrPlayer)
 
 

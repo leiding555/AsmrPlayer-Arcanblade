@@ -330,10 +330,8 @@ std::optional<SubtitleMatchRule> matchingRule(const Stem &audio, const Stem &sub
     return std::nullopt;
 }
 
-} // namespace
-
-SubtitleMatchResult SubtitleMatcher::match(const LibraryWork &work,
-                                           const QVector<LibraryFile> &files)
+SubtitleMatchResult matchFiles(const LibraryWork &work, const QVector<LibraryFile> &files,
+                               std::optional<qint64> onlyAudio)
 {
     SubtitleMatchResult result;
     result.workId = work.id;
@@ -343,7 +341,8 @@ SubtitleMatchResult SubtitleMatcher::match(const LibraryWork &work,
     QMap<qint64, PreparedFile> subtitles;
     for (const auto &file : prepared) {
         if (file.type == LibraryFileType::Audio) {
-            audioFiles.insert(file.id, file);
+            if (!onlyAudio || file.id == *onlyAudio)
+                audioFiles.insert(file.id, file);
         } else {
             subtitles.insert(file.id, file);
         }
@@ -418,6 +417,25 @@ SubtitleMatchResult SubtitleMatcher::match(const LibraryWork &work,
     result.rejectedFileIds = rejected.values();
     std::sort(result.rejectedFileIds.begin(), result.rejectedFileIds.end());
     return result;
+}
+} // namespace
+
+SubtitleMatchResult SubtitleMatcher::match(const LibraryWork &work, const QVector<LibraryFile> &files)
+{
+    return matchFiles(work, files, std::nullopt);
+}
+
+QVector<qint64> SubtitleMatcher::rankedRecommendations(const LibraryWork &work, const QVector<LibraryFile> &files,
+                                                       qint64 audioId)
+{
+    // Recommendation and display order depend only on this track. Other tracks
+    // are needed only for import-time ambiguity checks, not for this ranking.
+    const auto matches = matchFiles(work, files, audioId);
+    QVector<qint64> ids;
+    if (!matches.tracks.isEmpty())
+        for (const auto &candidate : matches.tracks.first().candidates)
+            if (candidate.recommended) ids.push_back(candidate.subtitleFileId);
+    return ids;
 }
 
 QHash<qint64, qint64> SubtitleMatcher::sharedAudioPartners(

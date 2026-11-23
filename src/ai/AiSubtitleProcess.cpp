@@ -1,13 +1,16 @@
 #include "ai/AiSubtitleProcess.h"
+#include <QByteArrayView>
 #include <QElapsedTimer>
 #include <QDir>
 #include <QFile>
+#include <QFileInfo>
 #include <QProcess>
 #include <QRegularExpression>
 #include <QThread>
 #include <algorithm>
 #include <vector>
 #include <memory>
+#include <optional>
 #ifdef Q_OS_WIN
 #ifndef NOMINMAX
 #define NOMINMAX
@@ -19,6 +22,57 @@ namespace asmr {
 namespace {
 constexpr qint64 ProcessLogLimit = 4 * 1024 * 1024;
 constexpr qsizetype TailLimit = 16 * 1024;
+// Inspect full lines before the diagnostic log and tail are truncated. Discard
+// oversized noise lines without treating a suffix of one as a completion marker.
+class WhisperCompletionLog final {
+public:
+    explicit WhisperCompletionLog(const QString &taskDirectory)
+        : m_writtenLine("Subtitles are written to '" + QDir::toNativeSeparators(taskDirectory).toUtf8() + "' directory.") {}
+
+    void consume(QByteArrayView bytes)
+    {
+        while (!bytes.empty() && !m_finished) {
+            const auto end = std::find_if(bytes.begin(), bytes.end(), [](char c) { return c == '\r' || c == '\n'; });
+            const qsizetype length = end - bytes.begin();
+            // The directory is the only variable-length field in either engine message.
+            if (length > m_writtenLine.size() + 128 - m_line.size())
+                m_oversized = true;
+            if (!m_oversized)
+                m_line.append(bytes.data(), length);
+            if (end == bytes.end())
+                return;
+            endLine();
+            bytes = bytes.sliced(length + 1);
+        }
+    }
+
+    void endLine()
+    {
+        if (!m_oversized && !m_finished) {
+            while (m_line.endsWith(' ') || m_line.endsWith('\t'))
+                m_line.chop(1);
+            if (!m_written) {
+                m_written = m_line == m_writtenLine;
+            } else if (m_line.startsWith("Operation finished in:")) {
+                static const QRegularExpression finishedTime(QStringLiteral(
+                    "\\AOperation finished in:[ \\t]+[0-9]+:[0-9]{2}:[0-9]{2}(?:\\.[0-9]+)?\\z"));
+                m_finished = finishedTime.match(QString::fromLatin1(m_line)).hasMatch();
+            }
+        }
+        m_line.clear();
+        m_oversized = false;
+    }
+
+    bool finished() const { return m_finished; }
+
+private:
+    const QByteArray m_writtenLine;
+    QByteArray m_line;
+    bool m_oversized = false;
+    bool m_written = false;
+    bool m_finished = false;
+};
+
 #ifdef Q_OS_WIN
 class ProcessJob final {
 public:
@@ -220,12 +274,17 @@ AiSubtitleProcessResult runAiSubtitleProcess(const AiSubtitleProcessRequest &req
     QByteArray tail;
     bool logTruncated = false;
     bool logFailed = false;
+    std::optional<WhisperCompletionLog> whisperCompletion;
+    if (request.parseWhisperProgress)
+        whisperCompletion.emplace(QFileInfo(request.logPath).absolutePath());
     auto drain = [&](QProcess &process) {
         // Bound both disk usage and the diagnostic tail even if an external engine is noisy.
         for (int blockIndex = 0; blockIndex < 64 && process.bytesAvailable() > 0; ++blockIndex) {
             const QByteArray block = process.read(64 * 1024);
             if (block.isEmpty())
                 break;
+            if (whisperCompletion)
+                whisperCompletion->consume(block);
             const qint64 remaining = std::max(qint64(0), ProcessLogLimit - processLog.size());
             if (remaining > 0) {
                 const qint64 count = std::min(remaining, qint64(block.size()));
@@ -301,10 +360,14 @@ AiSubtitleProcessResult runAiSubtitleProcess(const AiSubtitleProcessRequest &req
     if (!forcedTermination && !parentSucceeded) {
         bool activeWorkers = false;
         QString details, inspectionError;
-        abnormalExitWithoutWorkers = job.hasActiveChildren(parentPid, &activeWorkers, &details, &inspectionError)
-            && !activeWorkers;
+        const bool childrenInspected = job.hasActiveChildren(parentPid, &activeWorkers, &details, &inspectionError);
+        abnormalExitWithoutWorkers = childrenInspected && !activeWorkers;
         executionError = QStringLiteral("Local inference engine failed (exit %1). See %2.")
             .arg(result.exitCode).arg(request.logPath);
+        if (!childrenInspected)
+            executionError += QStringLiteral("\n引擎异常退出时无法核实工作子进程状态：%1").arg(inspectionError);
+        if (activeWorkers)
+            executionError += QStringLiteral("\n引擎异常退出时有工作子进程仍在运行：%1").arg(details);
         forcedTermination = true;
     }
     if (!forcedTermination) {
@@ -378,8 +441,17 @@ AiSubtitleProcessResult runAiSubtitleProcess(const AiSubtitleProcessRequest &req
     result.tail = tail; // Retain structured diagnostics for abnormal exits too.
     if (cancelled.load())
         return result;
-    if (logFailed)
-        { result.error = QStringLiteral("Could not save process diagnostics; see the task directory."); return result; }
+    if (logFailed) {
+        result.error = QStringLiteral("无法完整保存进程日志 %1（%2）。").arg(request.logPath, processLog.errorString());
+        if (!executionError.isEmpty())
+            result.error += QLatin1Char('\n') + executionError;
+        return result;
+    }
+    if (whisperCompletion) {
+        if (process.bytesAvailable() == 0)
+            whisperCompletion->endLine(); // The final engine line may have no newline.
+        result.whisperTaskFinished = whisperCompletion->finished();
+    }
     result.abnormalExitWithoutActiveWorkers = abnormalExitWithoutWorkers;
     if (forcedTermination || !executionError.isEmpty())
         { result.error = executionError + QLatin1Char('\n') + QString::fromUtf8(tail.right(4096)); return result; }

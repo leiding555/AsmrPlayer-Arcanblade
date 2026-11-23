@@ -31,6 +31,12 @@ QVector<BusinessTableSchema> businessTableSchemas(int version)
     if (version >= 8) {
         tables.append({QStringLiteral("category_artwork"), QStringLiteral("CREATE TABLE category_artwork (category_id INTEGER PRIMARY KEY REFERENCES categories(id) ON DELETE CASCADE, managed_file TEXT NOT NULL CHECK(length(managed_file) > 0))")});
     }
+    if (version >= 9) {
+        tables.append({QStringLiteral("track_favorites"), QStringLiteral(
+            "CREATE TABLE track_favorites (id INTEGER PRIMARY KEY, "
+            "audio_file_id INTEGER NOT NULL UNIQUE REFERENCES work_files(id) ON DELETE CASCADE, "
+            "added_at_ms INTEGER NOT NULL CHECK(typeof(added_at_ms) = 'integer' AND added_at_ms >= 0))")});
+    }
     return tables;
 }
 BusinessDatabase::BusinessDatabase(QString path)

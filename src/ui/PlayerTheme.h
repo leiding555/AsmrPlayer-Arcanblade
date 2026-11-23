@@ -52,25 +52,18 @@ QToolButton#libraryCoverMenuButton:disabled {
     background: transparent; border-color: transparent; color: #69717D; }
 QToolButton#libraryCoverMenuButton::menu-indicator {
     image: none; width: 0px; height: 0px; }
-QWidget#librarySidebar QPushButton#libraryImportMenuButton,
-QWidget#librarySidebar QToolButton#libraryImportMenuButton,
-QWidget#librarySidebar QPushButton#libraryAiSubtitlesButton,
-QWidget#librarySidebar QPushButton#librarySettingsButton,
-QWidget#librarySidebar QToolButton#librarySettingsButton {
+QWidget#librarySidebar QPushButton#libraryFavoritesButton {
     background: transparent; border: 1px solid transparent; text-align: left; padding: 9px 12px; }
-QWidget#librarySidebar QPushButton#libraryImportMenuButton::menu-indicator,
-QWidget#librarySidebar QPushButton#librarySettingsButton::menu-indicator {
+QWidget#libraryFooterActions QPushButton {
+    background: transparent; border: 1px solid transparent; padding: 0; min-height: 34px; text-align: center; }
+QWidget#libraryFooterActions QPushButton::menu-indicator {
     image: none; width: 0px; height: 0px; }
-QWidget#librarySidebar QPushButton#libraryImportMenuButton:hover,
-QWidget#librarySidebar QToolButton#libraryImportMenuButton:hover,
-QWidget#librarySidebar QPushButton#libraryAiSubtitlesButton:hover,
-QWidget#librarySidebar QPushButton#librarySettingsButton:hover,
-QWidget#librarySidebar QToolButton#librarySettingsButton:hover { background: #252C33; }
-QWidget#librarySidebar QPushButton#libraryImportMenuButton[buttonKeyboardFocus="true"]:focus:enabled,
-QWidget#librarySidebar QToolButton#libraryImportMenuButton[buttonKeyboardFocus="true"]:focus:enabled,
-QWidget#librarySidebar QPushButton#libraryAiSubtitlesButton[buttonKeyboardFocus="true"]:focus:enabled,
-QWidget#librarySidebar QPushButton#librarySettingsButton[buttonKeyboardFocus="true"]:focus:enabled,
-QWidget#librarySidebar QToolButton#librarySettingsButton[buttonKeyboardFocus="true"]:focus:enabled { border-color: #69C8A5; }
+QWidget#librarySidebar QPushButton#libraryFavoritesButton:hover,
+QWidget#libraryFooterActions QPushButton:hover:enabled { background: #252C33; }
+QWidget#libraryFooterActions QPushButton:pressed:enabled { background: #343D47; }
+QWidget#librarySidebar QPushButton#libraryFavoritesButton[buttonKeyboardFocus="true"]:focus:enabled,
+QWidget#libraryFooterActions QPushButton[buttonKeyboardFocus="true"]:focus:enabled { border-color: #69C8A5; }
+QWidget#librarySidebar QPushButton#libraryFavoritesButton:checked { color: #F2FFF8; background: #244B40; }
 QWidget#librarySidebar QPushButton#libraryRefreshScanRootsButton,
 QWidget#librarySidebar QToolButton#libraryRefreshScanRootsButton {
     background: transparent; border-color: transparent; padding: 3px 5px; }
@@ -164,6 +157,10 @@ QMenu::item { padding: 8px 20px; }
 QMenu::item:selected { background: #244B40; }
 QMenu::item:disabled { color: #69717D; }
 QMenu::separator { height: 1px; background: #39414B; margin: 5px 9px; }
+QMenu#windowCloseBehaviorMenu::indicator {
+    width: 8px; height: 8px; left: 6px;
+    border: none; border-radius: 4px; background: transparent; }
+QMenu#windowCloseBehaviorMenu::indicator:checked { background: #69C8A5; }
 QComboBox, QSpinBox, QDoubleSpinBox, QLineEdit { background: #181D23; border: 1px solid #46515D;
     border-radius: 4px; padding: 5px; selection-background-color: #244B40; }
 QComboBox, QSpinBox, QDoubleSpinBox { padding-right: 31px; min-height: 20px; }

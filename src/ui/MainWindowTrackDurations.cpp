@@ -12,13 +12,35 @@ void MainWindow::connectTrackDurations()
     m_trackDurationService = new TrackDurationService(this);
     connect(m_libraryPanel, &LibraryPanel::trackDurationDemandChanged,
             this, &MainWindow::requestVisibleTrackDurations);
+    connect(m_libraryPanel, &LibraryPanel::favoriteDurationDemandChanged, this,
+        [this](const QVector<qint64> &fileIds) {
+            if (m_closing) return;
+            const QSet<qint64> wanted(fileIds.cbegin(), fileIds.cend());
+            QVector<TrackDurationRequest> requests;
+            for (const auto &track : m_favoriteTracks) {
+                if (wanted.contains(track.file.id) && !track.file.missing
+                    && !m_removedLibraryWorkIds.contains(track.work.id))
+                    requests.append({track.work.id, track.file.id, track.work.rootPath, track.file.relativePath});
+            }
+            m_trackDurationService->setDemand(std::move(requests));
+        });
     connect(m_trackDurationService, &TrackDurationService::durationReady, this,
         [this](const TrackDurationResult &result) {
             const auto &request = result.request;
-            if (m_closing || m_libraryQueryInProgress || m_libraryQueryPending
+            if (m_closing || m_removedLibraryWorkIds.contains(request.workId)) return;
+            if (m_libraryPanel->showingFavorites()) {
+                const bool present = std::any_of(m_favoriteTracks.cbegin(), m_favoriteTracks.cend(),
+                    [&request](const auto &track) {
+                        return track.file.id == request.fileId && track.work.id == request.workId
+                            && !track.file.missing && track.work.rootPath == request.rootPath
+                            && track.file.relativePath == request.relativePath;
+                    });
+                if (present) m_libraryPanel->setTrackDuration(request.workId, request.fileId, result.durationMs);
+                return;
+            }
+            if (m_libraryQueryInProgress || m_libraryQueryPending
                 || request.workId != m_librarySnapshotWorkId
-                || request.workId != m_libraryPanel->selectedWorkId()
-                || m_removedLibraryWorkIds.contains(request.workId)) return;
+                || request.workId != m_libraryPanel->selectedWorkId()) return;
             const auto work = std::find_if(m_libraryWorksSnapshot.cbegin(), m_libraryWorksSnapshot.cend(),
                 [&request](const auto &entry) {
                     return entry.id == request.workId && entry.rootPath == request.rootPath;
