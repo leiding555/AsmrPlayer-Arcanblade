@@ -274,11 +274,28 @@ qint64 firstUsableRecommendation(const LibraryTrackSubtitlesResult &snapshot)
     if (subtitles.isEmpty())
         return 0;
 
+    const bool flac = snapshot.audio.extension.compare(u"flac", Qt::CaseInsensitive) == 0;
     const auto ranked = SubtitleMatcher::rankedRecommendations(snapshot.work, snapshot.files, snapshot.audio.id);
-    for (const auto id : ranked) {
-        const auto *file = subtitles.value(id);
-        if (file && loadLibrarySubtitle(snapshot.work.rootPath, *file).succeeded())
-            return id;
+    for (const auto &candidate : ranked) {
+        const auto *file = subtitles.value(candidate.subtitleFileId);
+        if (!file) continue;
+        const auto generation = readGeneratedSubtitleInfo(QDir(snapshot.work.rootPath).filePath(file->relativePath));
+        const bool competing = !candidate.competingAudioFileIds.isEmpty();
+        if (generation && (flac || competing
+                || QFileInfo(generation->audioFileName).suffix().compare(u"flac", Qt::CaseInsensitive) == 0)) {
+            // Generated SRTs live one directory below their original audio.
+            const auto audio = QDir::cleanPath(QFileInfo(file->relativePath).path()
+                + QStringLiteral("/../") + generation->audioFileName);
+#ifdef Q_OS_WIN
+            if (audio.compare(snapshot.audio.relativePath, Qt::CaseInsensitive) != 0) continue;
+#else
+            if (audio != snapshot.audio.relativePath) continue;
+#endif
+        } else if (competing || (flac && candidate.ambiguousVersion)) {
+            continue;
+        }
+        if (loadLibrarySubtitle(snapshot.work.rootPath, *file).succeeded())
+            return file->id;
     }
     return 0;
 }

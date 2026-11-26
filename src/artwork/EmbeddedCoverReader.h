@@ -1,6 +1,7 @@
 #pragma once
 
 #include <QByteArray>
+#include <QStringView>
 
 #include <atomic>
 #include <functional>
@@ -10,10 +11,14 @@ class QFile;
 
 namespace asmr {
 
-// Read ID3 APIC pictures from an open MP3 or RIFF/WAVE file. Try front covers
-// first, keeping file order within each type. Stop once the visitor accepts one.
+enum class EmbeddedCoverFormat { Unsupported, Mp3, Wave, Flac };
+
+[[nodiscard]] EmbeddedCoverFormat embeddedCoverFormat(QStringView extension);
+
+// Read native FLAC PICTURE blocks or ID3 APIC pictures from MP3 and RIFF/WAVE.
+// Try front covers first, keeping file order within each group.
 [[nodiscard]] bool visitEmbeddedCoverImages(
-    QFile &file, bool wave, qint64 maxImageBytes,
+    QFile &file, EmbeddedCoverFormat format, qint64 maxImageBytes,
     const std::shared_ptr<std::atomic_bool> &cancelled,
     const std::function<bool(const QByteArray &)> &visitor);
 

@@ -94,11 +94,17 @@ void readAsset(Response &response, const QString &resource, const char *mime)
     response.set_content(file.readAll().toStdString(), mime);
 }
 
+const char *audioMimeType(const QString &extension)
+{
+    if (extension.compare(u"mp3", Qt::CaseInsensitive) == 0) return "audio/mpeg";
+    if (extension.compare(u"wav", Qt::CaseInsensitive) == 0) return "audio/wav";
+    if (extension.compare(u"flac", Qt::CaseInsensitive) == 0) return "audio/flac";
+    return nullptr;
+}
+
 bool supportedAudio(const LibraryFile &file)
 {
-    return file.type == LibraryFileType::Audio && !file.missing
-        && (file.extension.compare(QStringLiteral("mp3"), Qt::CaseInsensitive) == 0
-            || file.extension.compare(QStringLiteral("wav"), Qt::CaseInsensitive) == 0);
+    return file.type == LibraryFileType::Audio && !file.missing && audioMimeType(file.extension);
 }
 
 QString workFolderName(const LibraryWork &work)
@@ -342,8 +348,7 @@ struct MobilePlaybackService::Run {
             return;
         }
         const auto size = static_cast<size_t>(file->size());
-        const auto mime = track->extension.compare(QStringLiteral("mp3"), Qt::CaseInsensitive) == 0
-            ? "audio/mpeg" : "audio/wav";
+        const auto mime = audioMimeType(track->extension);
         response.set_header("Accept-Ranges", "bytes");
         if (request.method == "HEAD") {
             response.status = 200;

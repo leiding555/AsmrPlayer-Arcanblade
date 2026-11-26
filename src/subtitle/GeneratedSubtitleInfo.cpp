@@ -1,4 +1,5 @@
 #include "subtitle/GeneratedSubtitleInfo.h"
+#include "playback/AudioFormats.h"
 
 #include <QDir>
 #include <QCryptographicHash>
@@ -74,7 +75,7 @@ bool validTranslationInfo(const GeneratedSubtitleInfo &info)
 bool validInfo(const GeneratedSubtitleInfo &info)
 {
     const QString language = generationLanguage(info.mode);
-    const QString audioSuffix = QFileInfo(info.audioFileName).suffix().toLower();
+    const QString audioSuffix = QFileInfo(info.audioFileName).suffix();
     const QString audioStem = QFileInfo(info.audioFileName).completeBaseName();
     const QString subtitleStem = QFileInfo(info.subtitleFileName).completeBaseName();
     // Old direct-translation records keep their original untagged filename.
@@ -97,7 +98,7 @@ bool validInfo(const GeneratedSubtitleInfo &info)
     return !language.isEmpty() && (info.language.isEmpty() || info.language == language)
         && info.completedAt.isValid() && fileNameOnly(info.audioFileName)
         && fileNameOnly(info.subtitleFileName)
-        && (audioSuffix == QStringLiteral("mp3") || audioSuffix == QStringLiteral("wav"))
+        && isSupportedAudioExtension(audioSuffix)
         && QFileInfo(info.subtitleFileName).suffix().compare(QStringLiteral("srt"), Qt::CaseInsensitive) == 0
         && paired && validTranslationInfo(info);
 }

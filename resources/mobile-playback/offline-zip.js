@@ -6,6 +6,12 @@ const offlineZip = (() => {
   const view = bytes => new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
   const limit = 0xffffffff;
   const maxEntries = 8194;
+  const audioTypes = Object.freeze({ mp3: "audio/mpeg", wav: "audio/wav", flac: "audio/flac" });
+  function parseAudioName(name) {
+    const match = typeof name === "string" && /^audio-([1-9]\d{0,18})\.([a-z]+)$/.exec(name);
+    if (!match || !Object.hasOwn(audioTypes, match[2])) return null;
+    return { id: match[1], mime: audioTypes[match[2]] };
+  }
   const crcTable = Uint32Array.from({ length: 256 }, (_, index) => {
     for (let bit = 0; bit < 8; bit++) index = (index >>> 1) ^ ((index & 1) ? 0xedb88320 : 0);
     return index;
@@ -57,8 +63,8 @@ const offlineZip = (() => {
       const extra = pos + 46 + nameSize, next = extra + extraSize;
       if (next > size || nameSize > 64) throw invalid();
       const name = decoder.decode(directory.subarray(pos + 46, extra));
-      if (!/^(manifest\.json|cover\.png|audio-[1-9]\d{0,18}\.(mp3|wav)|subtitles-[1-9]\d{0,18}\.json)$/.test(name)
-          || entries.has(name)) throw invalid();
+      if (entries.has(name) || (!parseAudioName(name)
+          && !/^(manifest\.json|cover\.png|subtitles-[1-9]\d{0,18}\.json)$/.test(name))) throw invalid();
       let bytes = data.getUint32(pos + 24, true), local = data.getUint32(pos + 42, true);
       const crc = data.getUint32(pos + 16, true);
       if (data.getUint32(pos + 20, true) !== bytes) throw invalid();
@@ -120,9 +126,10 @@ const offlineZip = (() => {
         || !info.tracks.length || entries.size !== 2 + 2 * info.tracks.length) throw invalid();
     const ids = new Set();
     const tracks = info.tracks.map(track => {
+      const audio = parseAudioName(track?.audio);
       if (typeof track?.id !== "string" || !/^[1-9]\d{0,18}$/.test(track.id) || ids.has(track.id)
           || !Number.isSafeInteger(track.order) || track.order < 0 || typeof track.name !== "string" || !track.name
-          || (track.audio !== `audio-${track.id}.wav` && track.audio !== `audio-${track.id}.mp3`)
+          || audio?.id !== track.id
           || track.subtitles !== `subtitles-${track.id}.json`) throw invalid();
       if (track.directory !== undefined && track.directory !== "."
           && (typeof track.directory !== "string" || /[\\:\0]/.test(track.directory)
@@ -130,7 +137,7 @@ const offlineZip = (() => {
       ids.add(track.id);
       const entry = entries.get(track.audio), subtitles = entries.get(track.subtitles);
       if (!entry?.size || !subtitles?.size || subtitles.size > 64 * 1024 ** 2) throw invalid();
-      return { ...track, entry, subtitles, mime: track.audio.endsWith(".wav") ? "audio/wav" : "audio/mpeg" };
+      return { ...track, entry, subtitles, mime: audio.mime };
     });
     const cover = entries.get("cover.png");
     const image = await metadata(cover, 16 * 1024 ** 2);
@@ -150,5 +157,5 @@ const offlineZip = (() => {
       } };
   }
 
-  return { inspect, updateCrc };
+  return { inspect, updateCrc, audioTypes };
 })();

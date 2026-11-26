@@ -81,11 +81,6 @@ bool supportedSuffix(const QString &path)
 {
     return supported(QFileInfo(path).suffix().toLatin1());
 }
-bool embeddedCoverSuffix(const QString &suffix)
-{
-    return suffix.compare(u"mp3", Qt::CaseInsensitive) == 0
-        || suffix.compare(u"wav", Qt::CaseInsensitive) == 0;
-}
 int namePriority(const QFileInfo &info, const QString &audioStem)
 {
     const auto stem = info.completeBaseName().toCaseFolded();
@@ -151,7 +146,8 @@ CoverArtResult CoverArtLoader::loadFile(const QString &root, const QString &rela
     if (isCancelled(cancelled)) return result(CoverArtStatus::Cancelled, {});
     const auto relative = ManualCoverStore::normalizeRelativePath(relativePath);
     const auto suffix = QFileInfo(relative).suffix();
-    if (relative.isEmpty() || !(embedded ? embeddedCoverSuffix(suffix) : supported(suffix.toLatin1())))
+    const auto format = embedded ? embeddedCoverFormat(suffix) : EmbeddedCoverFormat::Unsupported;
+    if (relative.isEmpty() || (embedded ? format == EmbeddedCoverFormat::Unsupported : !supported(suffix.toLatin1())))
         return failure();
     std::error_code error;
     const auto rootStatus = fs::symlink_status(nativePath(root), error);
@@ -201,8 +197,7 @@ CoverArtResult CoverArtLoader::loadFile(const QString &root, const QString &rela
     } else if (cached) {
         image = *cached;
     } else {
-        const bool wave = suffix.compare(u"wav", Qt::CaseInsensitive) == 0;
-        (void)visitEmbeddedCoverImages(file, wave, options.maxFileBytes, cancelled, [&](const QByteArray &bytes) {
+        (void)visitEmbeddedCoverImages(file, format, options.maxFileBytes, cancelled, [&](const QByteArray &bytes) {
             QBuffer buffer;
             buffer.setData(bytes);
             if (!buffer.open(QIODevice::ReadOnly)) return false;
@@ -349,7 +344,7 @@ CoverArtResult CoverArtLoader::load(const CoverArtRequest &request,
                         const auto relative = rootDirectory.relativeFilePath(path);
                         if (supportedSuffix(path))
                             candidates.append({relative, namePriority(info, audioStem), NaturalSortKey(relative)});
-                        else if (request.libraryWork && embeddedCoverSuffix(info.suffix()))
+                        else if (request.libraryWork && embeddedCoverFormat(info.suffix()) != EmbeddedCoverFormat::Unsupported)
                             audioCandidates.append({relative, 0, NaturalSortKey(relative)});
                     }
                 }
@@ -378,7 +373,7 @@ CoverArtResult CoverArtLoader::load(const CoverArtRequest &request,
         });
     } else if (QDir::isAbsolutePath(request.audioPath)) {
         const auto relative = rootDirectory.relativeFilePath(QDir::cleanPath(request.audioPath));
-        if (embeddedCoverSuffix(QFileInfo(relative).suffix()))
+        if (embeddedCoverFormat(QFileInfo(relative).suffix()) != EmbeddedCoverFormat::Unsupported)
             audioCandidates.append({relative, 0, NaturalSortKey(relative)});
     }
     attempted = 0;

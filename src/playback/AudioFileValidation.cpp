@@ -1,4 +1,5 @@
 #include "playback/AudioFileValidation.h"
+#include "playback/AudioFormats.h"
 
 #include <QDir>
 #include <QFile>
@@ -127,9 +128,8 @@ AudioFileValidationResult checkFile(const QString &path,
                                    const std::filesystem::path &canonicalRoot = {})
 {
     const QFileInfo information(path);
-    const QString suffix = information.suffix().toLower();
-    if (suffix != QStringLiteral("mp3") && suffix != QStringLiteral("wav"))
-        return failure(QStringLiteral("不支持此音频格式，仅支持 MP3 和 WAV。"));
+    if (!isSupportedAudioExtension(information.suffix()))
+        return failure(QStringLiteral("不支持此音频格式，支持 MP3、WAV 和 FLAC。"));
     if (!information.exists())
         return failure(QStringLiteral("音频文件不存在或无法访问：%1").arg(path));
     if (!information.isFile())

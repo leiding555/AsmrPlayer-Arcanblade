@@ -12,6 +12,7 @@
 #include "playback/PlaybackProgressCoordinator.h"
 #include "playback/PlaybackDiagnosticLog.h"
 #include "playback/AudioFileValidation.h"
+#include "playback/AudioFormats.h"
 #include "subtitle/SubtitleFileLoader.h"
 #include "ui/FloatingSubtitleWindow.h"
 #include "ui/FloatingSubtitleAppearanceDialog.h"
@@ -2156,7 +2157,7 @@ void MainWindow::openAudioFile()
         return;
     const QString path = QFileDialog::getOpenFileName(
         this, QStringLiteral("选择音频文件"), QString(),
-        QStringLiteral("音频文件 (*.mp3 *.wav);;所有文件 (*)"));
+        audioFileNameFilter() + QStringLiteral(";;所有文件 (*)"));
     if (!path.isEmpty())
         requestOpenAudio(path);
 }

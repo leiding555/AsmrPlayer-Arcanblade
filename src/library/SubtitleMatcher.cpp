@@ -1,4 +1,5 @@
 #include "library/SubtitleMatcher.h"
+#include "playback/AudioFormats.h"
 
 #include <QDir>
 #include <QFileInfo>
@@ -207,8 +208,7 @@ Stem describeStem(const QString &fileName, bool subtitle)
         // Never reparse the resulting title, trim it, or change its real path.
         const auto dot = stem.withoutLanguageKey.lastIndexOf(QLatin1Char('.'));
         const auto extension = stem.withoutLanguageKey.mid(dot + 1);
-        if (dot > 0 && (extension == QStringLiteral("mp3")
-                        || extension == QStringLiteral("wav"))) {
+        if (dot > 0 && isSupportedAudioExtension(extension)) {
             stem.mediaExtension = extension;
             stem.withoutMediaExtensionKey = stem.withoutLanguageKey.left(dot);
         }
@@ -235,8 +235,7 @@ std::optional<PreparedFile> prepare(const LibraryFile &file, qint64 workId,
         return std::nullopt;
     const QFileInfo info(path);
     const QString extension = info.suffix().toLower();
-    const bool audio = file.type == LibraryFileType::Audio
-        && (extension == QStringLiteral("mp3") || extension == QStringLiteral("wav"));
+    const bool audio = file.type == LibraryFileType::Audio && isSupportedAudioExtension(extension);
     const bool subtitle = file.type == LibraryFileType::Subtitle
         && (extension == QStringLiteral("srt") || extension == QStringLiteral("vtt")
             || extension == QStringLiteral("lrc"));
@@ -289,7 +288,10 @@ QVector<PreparedFile> prepareUniqueFiles(const LibraryWork &work,
 QHash<qint64, qint64> audioPartners(const QMap<qint64, PreparedFile> &audioFiles)
 {
     QHash<QString, QVector<qint64>> groups;
-    for (const auto &file : audioFiles) groups[file.stem.key].append(file.id);
+    for (const auto &file : audioFiles) {
+        if (file.extension == QStringLiteral("wav") || file.extension == QStringLiteral("mp3"))
+            groups[file.stem.key].append(file.id);
+    }
     QHash<qint64, qint64> result;
     for (const auto &ids : groups) {
         if (ids.size() != 2) continue;
@@ -330,6 +332,13 @@ std::optional<SubtitleMatchRule> matchingRule(const Stem &audio, const Stem &sub
     return std::nullopt;
 }
 
+bool numberOnlyMatch(const Stem &audio, const Stem &subtitle, SubtitleMatchRule rule)
+{
+    // A retained extension proves equality to the audio's own title, even
+    // when "01.ja.mp3.srt" would not look purely numeric by itself.
+    return audio.numberOnly && (rule == SubtitleMatchRule::MediaExtensionStem || subtitle.numberOnly);
+}
+
 SubtitleMatchResult matchFiles(const LibraryWork &work, const QVector<LibraryFile> &files,
                                std::optional<qint64> onlyAudio)
 {
@@ -341,15 +350,27 @@ SubtitleMatchResult matchFiles(const LibraryWork &work, const QVector<LibraryFil
     QMap<qint64, PreparedFile> subtitles;
     for (const auto &file : prepared) {
         if (file.type == LibraryFileType::Audio) {
-            if (!onlyAudio || file.id == *onlyAudio)
-                audioFiles.insert(file.id, file);
+            audioFiles.insert(file.id, file);
         } else {
             subtitles.insert(file.id, file);
         }
     }
+    // Playback ranks one track. Check FLAC ownership only for that track's
+    // recommendations, without matching every subtitle against every track.
+    QVector<const PreparedFile *> playbackCompetitors;
+    if (onlyAudio) {
+        const auto selected = audioFiles.constFind(*onlyAudio);
+        if (selected == audioFiles.cend()) return result;
+        for (const auto &other : std::as_const(audioFiles)) {
+            if (other.id != *onlyAudio && (selected->extension == u"flac" || other.extension == u"flac"))
+                playbackCompetitors.append(&other);
+        }
+    }
     const auto partners = audioPartners(audioFiles);
     QHash<qint64, QVector<qint64>> owners;
-    for (const auto &audio : audioFiles) {
+    QHash<qint64, QSet<qint64>> namedOwners;
+    for (const auto &audio : std::as_const(audioFiles)) {
+        if (onlyAudio && audio.id != *onlyAudio) continue;
         TrackSubtitleMatches track;
         track.audioFileId = audio.id;
         for (const auto &subtitle : subtitles) {
@@ -364,26 +385,41 @@ SubtitleMatchResult matchFiles(const LibraryWork &work, const QVector<LibraryFil
             candidate.directoryDistance = distance(audio, subtitle);
             candidate.trackNumberAgrees = !audio.stem.number.isEmpty()
                 && audio.stem.number == subtitle.stem.number;
-            // The media rule proves equality to the raw or language-stripped
-            // audio title. Keep its classification even for 01.ja.mp3.srt.
-            candidate.numberOnly = audio.stem.numberOnly
-                && (*rule == SubtitleMatchRule::MediaExtensionStem || subtitle.stem.numberOnly);
+            candidate.numberOnly = numberOnlyMatch(audio.stem, subtitle.stem, *rule);
             candidate.recommended = *rule != SubtitleMatchRule::TrackNumberOnly
                 && !candidate.numberOnly;
             track.candidates.push_back(candidate);
             owners[subtitle.id].push_back(audio.id);
+            if (candidate.recommended) {
+                namedOwners[subtitle.id].insert(audio.id);
+                for (const auto *other : playbackCompetitors) {
+                    const auto otherRule = matchingRule(other->stem, subtitle.stem, other->extension);
+                    if (otherRule && *otherRule != SubtitleMatchRule::TrackNumberOnly
+                        && !numberOnlyMatch(other->stem, subtitle.stem, *otherRule)) {
+                        owners[subtitle.id].push_back(other->id);
+                        namedOwners[subtitle.id].insert(other->id);
+                    }
+                }
+            }
         }
         result.tracks.push_back(std::move(track));
     }
     QHash<qint64, QHash<QString, QSet<qint64>>> strongVersions;
     for (const auto &track : result.tracks) {
+        const bool flac = audioFiles.constFind(track.audioFileId)->extension == u"flac";
         const auto groupId = std::min(track.audioFileId,
             partners.value(track.audioFileId, track.audioFileId));
-        for (const auto &candidate : track.candidates)
-            if (candidate.recommended)
-                strongVersions[groupId][languageSlot(candidate.language)].insert(candidate.subtitleFileId);
+        for (const auto &candidate : track.candidates) {
+            if (!candidate.recommended) continue;
+            // A generic subtitle claimed by multiple named tracks cannot
+            // disqualify an explicitly named FLAC subtitle in the same language.
+            if (flac && candidate.rule != SubtitleMatchRule::MediaExtensionStem
+                && namedOwners.value(candidate.subtitleFileId).size() > 1) continue;
+            strongVersions[groupId][languageSlot(candidate.language)].insert(candidate.subtitleFileId);
+        }
     }
     for (auto &track : result.tracks) {
+        const auto &audio = audioFiles.constFind(track.audioFileId).value();
         const auto partner = partners.value(track.audioFileId);
         const auto groupId = partner ? std::min(track.audioFileId, partner) : track.audioFileId;
         for (auto &candidate : track.candidates) {
@@ -392,6 +428,15 @@ SubtitleMatchResult matchFiles(const LibraryWork &work, const QVector<LibraryFil
             candidate.competingAudioFileIds = owners.value(candidate.subtitleFileId);
             candidate.competingAudioFileIds.removeAll(track.audioFileId);
             if (partner) candidate.competingAudioFileIds.removeAll(partner);
+            if (candidate.rule == SubtitleMatchRule::MediaExtensionStem) {
+                // A track number alone cannot claim another track's explicitly
+                // named FLAC subtitle, or claim its explicitly named WAV/MP3 from FLAC.
+                const auto strong = namedOwners.value(candidate.subtitleFileId);
+                candidate.competingAudioFileIds.removeIf([&](qint64 id) {
+                    const auto &other = audioFiles.constFind(id).value();
+                    return (audio.extension == u"flac" || other.extension == u"flac") && !strong.contains(id);
+                });
+            }
             candidate.autoAssociationAllowed = candidate.recommended
                 && !candidate.ambiguousVersion && candidate.competingAudioFileIds.isEmpty();
         }
@@ -425,17 +470,14 @@ SubtitleMatchResult SubtitleMatcher::match(const LibraryWork &work, const QVecto
     return matchFiles(work, files, std::nullopt);
 }
 
-QVector<qint64> SubtitleMatcher::rankedRecommendations(const LibraryWork &work, const QVector<LibraryFile> &files,
-                                                       qint64 audioId)
+QVector<SubtitleMatchCandidate> SubtitleMatcher::rankedRecommendations(
+    const LibraryWork &work, const QVector<LibraryFile> &files, qint64 audioId)
 {
-    // Recommendation and display order depend only on this track. Other tracks
-    // are needed only for import-time ambiguity checks, not for this ranking.
-    const auto matches = matchFiles(work, files, audioId);
-    QVector<qint64> ids;
-    if (!matches.tracks.isEmpty())
-        for (const auto &candidate : matches.tracks.first().candidates)
-            if (candidate.recommended) ids.push_back(candidate.subtitleFileId);
-    return ids;
+    auto matches = matchFiles(work, files, audioId);
+    if (matches.tracks.isEmpty()) return {};
+    auto candidates = std::move(matches.tracks.first().candidates);
+    candidates.removeIf([](const auto &candidate) { return !candidate.recommended; });
+    return candidates;
 }
 
 QHash<qint64, qint64> SubtitleMatcher::sharedAudioPartners(

@@ -1,6 +1,7 @@
 #include "artwork/EmbeddedCoverReader.h"
 
 #include <QByteArrayView>
+#include <QDataStream>
 #include <QFile>
 #include <QList>
 #include <QtEndian>
@@ -12,15 +13,30 @@ constexpr qint64 Id3HeaderBytes = 10;
 constexpr qint64 MaximumTagBytes = 32 * 1024 * 1024;
 constexpr qsizetype MaximumPicturesPerType = 32;
 constexpr int MaximumFrames = 4096;
-constexpr int MaximumWaveChunks = 4096;
+constexpr int MaximumContainerBlocks = 4096;
+
+struct Picture {
+    QByteArray bytes; // ID3 data may have needed unsynchronisation decoding.
+    qint64 fileOffset = 0;
+    qint64 length = 0;
+
+    [[nodiscard]] QByteArray read(QFile &file, qint64 &remainingBytes) const
+    {
+        if (!bytes.isEmpty()) return bytes;
+        if (length > remainingBytes || !file.seek(fileOffset)) return {};
+        remainingBytes -= length;
+        const auto data = file.read(length);
+        return data.size() == length ? data : QByteArray{};
+    }
+};
 
 struct PictureCandidates {
     qint64 maxImageBytes;
     const std::shared_ptr<std::atomic_bool> &cancelled;
     qint64 remainingTagBytes = MaximumTagBytes;
     int remainingFrames = MaximumFrames;
-    QList<QByteArray> front;
-    QList<QByteArray> other;
+    QList<Picture> front;
+    QList<Picture> other;
 
     [[nodiscard]] bool stopped() const
     {
@@ -81,7 +97,7 @@ void collectPicture(QByteArrayView frame, PictureCandidates &pictures)
         return;
     auto &target = frame[type] == 3 ? pictures.front : pictures.other;
     if (target.size() < MaximumPicturesPerType)
-        target.append(QByteArray(frame.data() + offset, frame.size() - offset));
+        target.append(Picture{frame.sliced(offset).toByteArray()});
 }
 
 void readId3Pictures(QFile &file, qint64 start, qint64 end, PictureCandidates &pictures)
@@ -163,7 +179,7 @@ void readWavePictures(QFile &file, PictureCandidates &pictures)
     if (end > file.size()) return;
 
     qint64 offset = 12;
-    for (int chunk = 0; chunk < MaximumWaveChunks && end - offset >= 8
+    for (int chunk = 0; chunk < MaximumContainerBlocks && end - offset >= 8
          && pictures.remainingTagBytes > 0 && pictures.remainingFrames > 0 && !pictures.stopped(); ++chunk) {
         if (!file.seek(offset)) return;
         const auto chunkHeader = file.read(8);
@@ -178,22 +194,78 @@ void readWavePictures(QFile &file, PictureCandidates &pictures)
     }
 }
 
+void collectFlacPicture(QFile &file, qint64 end, PictureCandidates &pictures)
+{
+    // Eight big-endian 32-bit fields, plus the MIME string, description and data.
+    if (end - file.pos() < 32) return;
+    QDataStream fields(&file);
+    quint32 type, mimeLength, descriptionLength, imageLength;
+    fields >> type >> mimeLength;
+    auto &target = type == 3 ? pictures.front : pictures.other;
+    if (target.size() >= MaximumPicturesPerType || mimeLength > end - file.pos() - 24
+        || (mimeLength == 3 && file.peek(3) == "-->") || !file.seek(file.pos() + mimeLength))
+        return;
+    fields >> descriptionLength;
+    // Skip the description and the four declared image properties. The image
+    // decoder validates the real dimensions against the existing pixel limit.
+    if (descriptionLength > end - file.pos() - 20 || !file.seek(file.pos() + descriptionLength + 16))
+        return;
+    fields >> imageLength;
+    if (fields.status() != QDataStream::Ok || imageLength == 0 || imageLength != end - file.pos()
+        || imageLength > pictures.maxImageBytes)
+        return;
+    // Defer reading image bytes so a large back cover cannot consume the
+    // tag budget before a front cover later in the same file is considered.
+    target.append(Picture{{}, file.pos(), imageLength});
+}
+
+void readFlacPictures(QFile &file, PictureCandidates &pictures)
+{
+    if (!file.seek(0) || file.read(4) != "fLaC") return;
+    const qint64 fileSize = file.size();
+    for (int block = 0; block < MaximumContainerBlocks && !pictures.stopped(); ++block) {
+        const auto header = file.read(4);
+        if (header.size() != 4) return;
+        const auto flags = static_cast<quint8>(header[0]);
+        const auto type = flags & 0x7f;
+        const qint64 length = qFromBigEndian<quint32>(header.constData()) & 0x00ffffffu;
+        if (length > fileSize - file.pos() || type == 127) return;
+        if (block == 0 && (type != 0 || length != 34)) return; // Mandatory STREAMINFO.
+        const qint64 end = file.pos() + length;
+        if (type == 6) collectFlacPicture(file, end, pictures);
+        if ((flags & 0x80) || !file.seek(end)) return; // Audio follows the last metadata block.
+    }
+}
+
 } // namespace
 
+EmbeddedCoverFormat embeddedCoverFormat(QStringView extension)
+{
+    if (extension.compare(u"mp3", Qt::CaseInsensitive) == 0) return EmbeddedCoverFormat::Mp3;
+    if (extension.compare(u"wav", Qt::CaseInsensitive) == 0) return EmbeddedCoverFormat::Wave;
+    if (extension.compare(u"flac", Qt::CaseInsensitive) == 0) return EmbeddedCoverFormat::Flac;
+    return EmbeddedCoverFormat::Unsupported;
+}
+
 bool visitEmbeddedCoverImages(
-    QFile &file, bool wave, qint64 maxImageBytes,
+    QFile &file, EmbeddedCoverFormat format, qint64 maxImageBytes,
     const std::shared_ptr<std::atomic_bool> &cancelled,
     const std::function<bool(const QByteArray &)> &visitor)
 {
     PictureCandidates pictures{maxImageBytes, cancelled};
     if (pictures.stopped() || maxImageBytes <= 0 || !file.isReadable() || file.isSequential() || !visitor)
         return false;
-    if (wave) readWavePictures(file, pictures);
-    else readId3Pictures(file, 0, file.size(), pictures);
+    switch (format) {
+    case EmbeddedCoverFormat::Mp3: readId3Pictures(file, 0, file.size(), pictures); break;
+    case EmbeddedCoverFormat::Wave: readWavePictures(file, pictures); break;
+    case EmbeddedCoverFormat::Flac: readFlacPictures(file, pictures); break;
+    case EmbeddedCoverFormat::Unsupported: return false;
+    }
     for (const auto *list : {&pictures.front, &pictures.other}) {
         for (const auto &image : *list) {
             if (pictures.stopped()) return false;
-            if (visitor(image)) return true;
+            const auto bytes = image.read(file, pictures.remainingTagBytes);
+            if (!bytes.isEmpty() && !pictures.stopped() && visitor(bytes)) return true;
         }
     }
     return false;

@@ -1,4 +1,5 @@
 #include "DirectoryScanner.h"
+#include "playback/AudioFormats.h"
 
 #include <QDir>
 #include <QFile>
@@ -334,8 +335,7 @@ DirectoryScanResult DirectoryScanner::scan(
             }
 
             const QString extension = QFileInfo(entry.fileName).suffix().toLower();
-            const bool audio = extension == QStringLiteral("mp3")
-                || extension == QStringLiteral("wav");
+            const bool audio = isSupportedAudioExtension(extension);
             const bool subtitle = extension == QStringLiteral("srt")
                 || extension == QStringLiteral("vtt") || extension == QStringLiteral("lrc");
             const bool reference = subtitle || extension == QStringLiteral("txt")

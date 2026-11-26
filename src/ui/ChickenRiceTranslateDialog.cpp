@@ -1,4 +1,5 @@
 #include "ui/ChickenRiceTranslateDialog.h"
+#include "playback/AudioFormats.h"
 #include "ui/FasterWhisperInstallWidget.h"
 #include "ui/SubtitleTranslationWidget.h"
 #include "ui/TranslationApiSettingsWidget.h"
@@ -1802,7 +1803,7 @@ void ChickenRiceTranslateDialog::browseAudioFiles()
     dialog->setAttribute(Qt::WA_DeleteOnClose);
     dialog->setWindowModality(Qt::WindowModal);
     dialog->setFileMode(QFileDialog::ExistingFiles);
-    dialog->setNameFilters({QStringLiteral("音频文件 (*.mp3 *.wav)"),
+    dialog->setNameFilters({audioFileNameFilter(),
         QStringLiteral("所有文件 (*)")});
     m_audioPicker = dialog;
     connect(dialog, &QDialog::finished, this, [this, dialog](int result) {

@@ -1,5 +1,6 @@
 #include "library/LibraryRepository.h"
 #include "library/BusinessDatabase.h"
+#include "playback/AudioFormats.h"
 
 #include <QDateTime>
 #include <QDebug>
@@ -302,7 +303,7 @@ LibraryOperationResult prepareImportFiles(const DirectoryScanResult &scan,
                 || file.type != expectedType || file.fileName != QFileInfo(relative).fileName()
                 || file.extension != QFileInfo(relative).suffix().toLower()
                 || (expectedType == LibraryFileType::Audio
-                        ? file.extension != QStringLiteral("mp3") && file.extension != QStringLiteral("wav")
+                        ? !isSupportedAudioExtension(file.extension)
                         : file.extension != QStringLiteral("srt") && file.extension != QStringLiteral("vtt")
                               && file.extension != QStringLiteral("lrc"))) {
                 return failure(LibraryDiagnosticCode::InvalidScanRecord, file.absolutePath,

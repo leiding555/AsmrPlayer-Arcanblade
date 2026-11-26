@@ -13,6 +13,7 @@ self.onmessage = async ({ data }) => {
   controller = new AbortController();
   let access;
   try {
+    if (!Object.values(offlineZip.audioTypes).includes(mime)) throw new Error("音频格式不受支持。");
     if (previous) {
       let identical = true;
       let crc = 0xffffffff;
@@ -29,8 +30,6 @@ self.onmessage = async ({ data }) => {
         return;
       }
     }
-    if (mime !== "audio/mpeg" && mime !== "audio/wav") throw new Error("音频格式不受支持。");
-
     const storage = await navigator.storage.getDirectory();
     const root = await storage.getDirectoryHandle(directory, { create: true });
     const handle = await root.getFileHandle(file, { create: true });

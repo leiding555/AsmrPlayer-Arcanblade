@@ -255,6 +255,7 @@ endif()
 
 # Filesystem-only validation is also built directly into the isolated tests.
 set(_audio_file_validation_sources
+    src/playback/AudioFormats.h
     src/playback/AudioFileValidation.h
     src/playback/AudioFileValidation.cpp
 )

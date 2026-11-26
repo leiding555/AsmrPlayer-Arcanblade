@@ -373,7 +373,7 @@ function renderDirectory(entry) {
   connection.textContent = "";
   if (!folders.size && !directoryTracks.length) {
     connection.textContent = directory ? "此目录没有可播放的音轨。"
-      : hosted ? "该作品没有已保存的音轨。" : "此作品没有可播放的 MP3 或 WAV 音轨。";
+      : hosted ? "该作品没有已保存的音轨。" : "此作品没有可播放的 MP3、WAV 或 FLAC 音轨。";
   }
 }
 
@@ -1420,11 +1420,11 @@ audio.addEventListener("error", async () => {
   closeSubtitlePip();
   updateSubtitlePipButton();
   if (playingOffline) {
-    playbackStatus.textContent = "此设备无法播放已保存的音频。";
+    playbackStatus.textContent = "无法播放已保存的音轨。请检查文件是否完好，以及当前浏览器是否支持该音频格式。";
     return;
   }
   const generation = trackGeneration;
-  playbackStatus.textContent = "无法播放。请检查电脑连接和音频文件，或尝试 MP3／常见 PCM WAV。";
+  playbackStatus.textContent = "无法播放。请检查电脑连接、音频文件，以及当前浏览器是否支持该音频格式。";
   try {
     const response = await fetch(audio.src, { method: "HEAD" });
     if (generation !== trackGeneration) return;
