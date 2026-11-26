@@ -23,9 +23,10 @@ struct SubtitleMatchCandidate {
     qsizetype directoryDistance = 0; // Parent/child edges between relative directories.
     bool trackNumberAgrees = false;
     bool numberOnly = false; // Effective matched titles contain only number syntax.
-    bool recommended = false; // Named title rule; may still be ambiguous.
+    bool recommended = false; // Named title or same-directory exact digits; may still be ambiguous.
     bool ambiguousVersion = false; // Other strong versions in this track/format pair's language slot.
     QVector<qint64> competingAudioFileIds; // Other candidate owners, ascending stable ID.
+    bool flacOwnershipConflict = false; // Another name-matched owner where at least one side is FLAC.
     bool autoAssociationAllowed = false; // Advice only; never writes a binding.
 
     bool operator==(const SubtitleMatchCandidate &) const = default;
@@ -55,12 +56,8 @@ class SubtitleMatcher final {
 public:
     static SubtitleMatchResult match(const LibraryWork &work,
                                      const QVector<LibraryFile> &files);
-    // Playback retains its historical WAV/MP3 fallback. Competing owners in
-    // these rankings report ambiguities involving FLAC. match() reports all.
-    static QVector<SubtitleMatchCandidate> rankedRecommendations(const LibraryWork &work,
-        const QVector<LibraryFile> &files, qint64 audioId);
     // Bidirectional IDs for one present WAV and one present MP3 with the same
-    // complete base name anywhere in the work. Duplicate formats do not pair.
+    // complete base name. Digits alone only pair in one directory. Duplicate formats do not pair.
     // Uses the same path/link guards as match(); call off the GUI thread.
     static QHash<qint64, qint64> sharedAudioPartners(const LibraryWork &work,
                                                   const QVector<LibraryFile> &files);

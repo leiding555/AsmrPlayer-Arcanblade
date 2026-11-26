@@ -6,6 +6,8 @@
 
 namespace asmr {
 
+struct SubtitleMatchResult;
+
 enum class LibrarySubtitleDecision { NoAvailable, Disabled, NeedsSelection, Selected, Error };
 enum class LibrarySubtitleIssueCode { Database, Identity, Missing, UnsafePath, Unreadable, Unsupported };
 struct LibrarySubtitleIssue {
@@ -27,7 +29,6 @@ struct LibrarySubtitleResolution {
     LibraryFile selectedFile;
     QVector<LibrarySubtitleIssue> issues;
     bool pruned = false;
-    bool boundRecommendation = false;
 };
 struct LibrarySubtitleOrderKey {
     QDateTime time;
@@ -61,7 +62,12 @@ inline bool librarySubtitleNewer(const LibrarySubtitleOrderKey &left, const Libr
 LibrarySubtitlePathResult validateLibrarySubtitlePath(const QString &root, const LibraryFile &file);
 LibrarySubtitleResolution resolveLibrarySubtitles(const QString &databasePath,
                                                  qint64 workId, qint64 audioFileId);
-LibrarySubtitleResolution selectLibrarySubtitles(const QString &databasePath, LibraryTrackSubtitlesResult snapshot);
+LibrarySubtitleResolution selectLibrarySubtitles(LibraryTrackSubtitlesResult snapshot);
+// Each key is an automatic-mode track; the set includes current and planned bindings.
+// Generated subtitles already handled by source identity are excluded from fallback.
+QVector<AutoSubtitleBinding> recommendedScanBindings(
+    const LibraryWork &work, const QVector<LibraryFile> &files, const SubtitleMatchResult &matches,
+    const QHash<qint64, QSet<qint64>> &boundByAudio, const QHash<qint64, qint64> &generatedAudio);
 // Recheck containment/readability immediately before and after the existing loader.
 SubtitleFileLoadResult loadLibrarySubtitle(const QString &root, const LibraryFile &file);
 

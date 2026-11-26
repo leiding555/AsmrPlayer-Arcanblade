@@ -10,6 +10,7 @@
 #include "ui/PlayerMessageBox.h"
 
 #include <QFileDialog>
+#include <QDateTime>
 #include <QDesktopServices>
 #include <QDir>
 #include <QFile>
@@ -23,6 +24,7 @@
 
 #include <algorithm>
 #include <filesystem>
+#include <utility>
 
 namespace asmr {
 
@@ -54,11 +56,11 @@ void MainWindow::connectScanRoots()
         m_libraryImportState = LibraryImportState::Scanning;
     });
     connect(m_libraryRootRefreshService, &LibraryRootRefreshService::stateChanged, this,
-        [this](const QString &text) {
+        [this] {
         if (m_closing)
             return;
-        m_libraryPanel->setImportState(m_libraryImportState, text,
-                                       m_libraryRootRefreshService->isActive(), true);
+        m_libraryPanel->setImportState(m_libraryImportState, {},
+                                       m_libraryRootRefreshService->isActive(), LibraryPanel::TaskMode::RootRefresh);
         updateScanRootManager();
     });
     connect(m_libraryRootRefreshService, &LibraryRootRefreshService::finished,
@@ -316,10 +318,10 @@ void MainWindow::updateScanRootManager()
     for (const auto &root : m_scanRootStore->roots()) {
         const auto key = ScanRootStore::pathKey(root);
         const auto presentation = m_scanRootPresentations.value(key,
-            ScanRootPresentation{QStringLiteral("尚未扫描"), false});
+            ScanRootPresentation{QStringLiteral("尚未扫描"), false, {}});
         m_scanRootManagerDialog->setRootStatus(root,
-            m_scanRootStatuses.value(key, QStringLiteral("尚未扫描")),
-            presentation.summary, presentation.reviewRequired);
+            m_scanRootStatuses.value(key, QStringLiteral("本次启动尚未扫描")),
+            presentation.summary, presentation.reviewRequired, presentation.lastReport);
     }
 }
 
@@ -359,8 +361,10 @@ void MainWindow::startRootRefresh(const QStringList &roots)
     }
     for (const auto &root : requested) {
         const auto key = ScanRootStore::pathKey(root);
-        m_scanRootStatuses.insert(key, QStringLiteral("等待或正在扫描"));
-        m_scanRootPresentations.insert(key, {QStringLiteral("扫描中"), false});
+        m_scanRootStatuses.insert(key, QStringLiteral("等待或正在扫描，本轮结果将在结束后更新。"));
+        auto &presentation = m_scanRootPresentations[key];
+        presentation.summary = QStringLiteral("扫描中");
+        presentation.reviewRequired = false;
     }
     updateScanRootManager();
 }
@@ -501,28 +505,38 @@ void MainWindow::applyRootRefreshFinished(const LibraryRootRefreshResult &result
         if (details.size() < 200) details.append(text);
         else ++suppressed;
     };
-    qsizetype added = 0, updated = 0, removed = 0, skipped = 0, failed = 0, overlaps = 0, associationFailed = 0;
+    qsizetype failed = 0, associationFailed = 0;
     const auto &verification = result.workVerification;
-    removed += verification.removed;
+    QString failureDetail = result.errorMessage.isEmpty() ? verification.errorMessage : result.errorMessage;
+    const auto noteItemFailure = [&failureDetail](const LibraryRootRefreshItemResult &item) {
+        if (!failureDetail.isEmpty() || (item.outcome != LibraryRootRefreshItemOutcome::Failed
+            && item.associationStatus != LibraryAutoAssociationStatus::Failed
+            && item.associationStatus != LibraryAutoAssociationStatus::StaleSnapshot)) return;
+        const QString reason = item.errorMessage.isEmpty() ? item.diagnostics.value(0) : item.errorMessage;
+        failureDetail = item.directory;
+        if (!reason.isEmpty()) {
+            if (!failureDetail.isEmpty()) failureDetail += QStringLiteral("：");
+            failureDetail += reason;
+        }
+    };
     failed += verification.failed + (verification.errorMessage.isEmpty() ? 0 : 1);
     if (!verification.errorMessage.isEmpty())
         detail(QStringLiteral("在库作品核验：%1").arg(verification.errorMessage));
     for (const auto &message : verification.diagnostics) detail(message);
     for (const auto &item : verification.items) {
+        noteItemFailure(item);
         if (!item.errorMessage.isEmpty())
             detail(item.directory + QStringLiteral("：") + item.errorMessage);
         for (const auto &message : item.diagnostics) detail(message);
     }
     if (verification.notStarted > 0)
         detail(QStringLiteral("在库作品核验尚有 %1 项未开始，记录保留。").arg(verification.notStarted));
+    const QString finishedAt = QDateTime::currentDateTime().toString(QStringLiteral("yyyy-MM-dd HH:mm:ss"));
     for (const auto &root : result.roots) {
-        added += root.imported;
-        updated += root.updated;
-        removed += root.removed;
-        skipped += root.skipped;
         failed += root.failed + (root.errorMessage.isEmpty() ? 0 : 1);
-        overlaps += root.overlapDirectories.size();
         associationFailed += root.associationFailed;
+        if (failureDetail.isEmpty() && !root.errorMessage.isEmpty())
+            failureDetail = root.rootDirectory + QStringLiteral("：") + root.errorMessage;
         QString status = QStringLiteral("新增 %1，更新 %2，已清理作品 %3，跳过 %4，失败 %5，重叠待确认 %6，字幕关联异常 %7")
             .arg(root.imported).arg(root.updated).arg(root.removed).arg(root.skipped)
             .arg(root.failed).arg(root.overlapDirectories.size()).arg(root.associationFailed);
@@ -549,30 +563,50 @@ void MainWindow::applyRootRefreshFinished(const LibraryRootRefreshResult &result
             shortStatus += QStringLiteral(" · 待确认");
         const auto key = ScanRootStore::pathKey(root.rootDirectory);
         m_scanRootStatuses.insert(key, status);
-        m_scanRootPresentations.insert(key, {shortStatus, reviewRequired});
         detail(root.rootDirectory + QStringLiteral("：") + status);
-        for (const auto &message : root.diagnostics) detail(message);
-        for (const auto &item : root.items) {
-            if (!item.errorMessage.isEmpty())
-                detail(item.directory + QStringLiteral("：") + item.errorMessage);
-            for (const auto &message : item.diagnostics) detail(message);
+        QStringList rootDetails;
+        qsizetype omitted = root.suppressedDiagnostics;
+        const auto rootDetail = [&](const QString &message) {
+            detail(message);
+            if (rootDetails.size() < 200) rootDetails.append(message);
+            else ++omitted;
+        };
+        for (const auto &message : root.diagnostics) {
+            if (message != root.errorMessage) rootDetail(message);
         }
+        for (const auto &item : root.items) {
+            noteItemFailure(item);
+            if (!item.errorMessage.isEmpty())
+                rootDetail(item.directory + QStringLiteral("：") + item.errorMessage);
+            for (const auto &message : item.diagnostics) {
+                if (message != item.errorMessage)
+                    rootDetail(item.directory + QStringLiteral("：") + message);
+            }
+            omitted += item.suppressedDiagnostics;
+        }
+        if (omitted) rootDetails.append(QStringLiteral("另有 %1 条诊断未显示。").arg(omitted));
+        QString report = QStringLiteral("最近一轮：%1　%2\n%3").arg(finishedAt, shortStatus, status);
+        if (!rootDetails.isEmpty()) report += QStringLiteral("\n\n") + rootDetails.join(QLatin1Char('\n'));
+        m_scanRootPresentations.insert(key, {shortStatus, reviewRequired, std::move(report)});
     }
     if (!result.errorMessage.isEmpty())
         details.prepend(result.errorMessage);
-    const auto summary = QStringLiteral("%1 新增 %2，更新 %3，已清理作品 %4，跳过 %5，失败 %6，重叠待确认 %7，字幕关联异常 %8（已提交的作品更新保留）。")
-        .arg(result.cancelled ? QStringLiteral("刷新已停止。") : QStringLiteral("刷新完成。"))
-        .arg(added).arg(updated).arg(removed).arg(skipped).arg(failed).arg(overlaps).arg(associationFailed);
     if (suppressed)
         details.append(QStringLiteral("另有 %1 条诊断未显示。").arg(suppressed));
     m_libraryPanel->setImportFeedback({}, details.join(QLatin1Char('\n')));
+    QString error;
+    if (failed || associationFailed || !result.errorMessage.isEmpty()) {
+        error = result.cancelled ? QStringLiteral("刷新已停止，期间出现异常。") : QStringLiteral("刷新遇到异常。");
+        if (failed) error += QStringLiteral("失败 %1。").arg(failed);
+        if (associationFailed) error += QStringLiteral("字幕关联异常 %1。").arg(associationFailed);
+        error += QStringLiteral("已提交的作品更新保留。");
+        if (!failureDetail.isEmpty()) error += QLatin1Char('\n') + failureDetail;
+    }
     m_libraryImportState = result.cancelled ? LibraryImportState::Cancelled
-        : failed || associationFailed || !result.errorMessage.isEmpty()
-            ? LibraryImportState::Failed : LibraryImportState::Completed;
-    m_libraryPanel->setImportState(m_libraryImportState, summary, false);
-    if (result.cancelled && (failed || associationFailed || !result.errorMessage.isEmpty()))
-        m_libraryPanel->setImportError(summary + (result.errorMessage.isEmpty()
-            ? QString() : QLatin1Char('\n') + result.errorMessage));
+        : error.isEmpty() ? LibraryImportState::Completed : LibraryImportState::Failed;
+    m_libraryPanel->setImportState(m_libraryImportState, error, false);
+    if (result.cancelled && !error.isEmpty())
+        m_libraryPanel->setImportError(error);
     refreshLibrary(); // Preserve browsing and playback identities.
     updateScanRootManager();
     QTimer::singleShot(0, this, &MainWindow::tryStartScanRootInspection);

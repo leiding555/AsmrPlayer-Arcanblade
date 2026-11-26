@@ -91,11 +91,6 @@ void MainWindow::startLibrarySubtitleQuery()
         m_subtitleQueryInProgress = false;
         if (!m_closing && result.pruned)
             refreshLibrary();
-        if (result.boundRecommendation) {
-            refreshSubtitleBadges(workId);
-            if (workId == m_playingLibraryWorkId && fileId == m_playingLibraryFileId)
-                refreshBoundSubtitleChoices();
-        }
         if (isCurrentSubtitleRequest(audio, request, workId, fileId) && !m_manualSubtitleChoice) {
             m_librarySubtitleResolution = std::move(result);
             const auto &resolved = m_librarySubtitleResolution;

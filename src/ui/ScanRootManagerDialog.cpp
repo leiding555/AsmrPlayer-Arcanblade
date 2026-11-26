@@ -13,6 +13,7 @@
 #include <QItemSelectionModel>
 #include <QLabel>
 #include <QMenu>
+#include <QPlainTextEdit>
 #include <QPushButton>
 #include <QSignalBlocker>
 #include <QTableView>
@@ -26,6 +27,46 @@ QString safeTooltip(const QString &text)
         text.toHtmlEscaped().replace(QLatin1Char('\n'), QStringLiteral("<br/>")));
 }
 } // namespace
+
+class ScanRootInfoDialog final : public QDialog
+{
+public:
+    explicit ScanRootInfoDialog(QWidget *parent) : QDialog(parent)
+    {
+        setObjectName(QStringLiteral("scanRootInfoDialog"));
+        setWindowTitle(QStringLiteral("扫描信息"));
+        resize(680, 400);
+        m_text = new QPlainTextEdit(this);
+        m_text->setObjectName(QStringLiteral("scanRootInfoText"));
+        m_text->setReadOnly(true);
+        auto *buttons = new QDialogButtonBox(QDialogButtonBox::Close, this);
+        buttons->button(QDialogButtonBox::Close)->setText(QStringLiteral("关闭"));
+        connect(buttons, &QDialogButtonBox::rejected, this, &QDialog::reject);
+        auto *layout = new QVBoxLayout;
+        layout->addWidget(m_text, 1);
+        layout->addWidget(buttons);
+        m_frame = new DialogFrame(this, layout);
+    }
+
+    void setReport(const QString &root, const QString &report)
+    {
+        m_root = root;
+        m_text->setPlainText(report);
+    }
+    QString root() const { return m_root; }
+
+protected:
+    bool nativeEvent(const QByteArray &eventType, void *message, qintptr *result) override
+    {
+        if (m_frame && m_frame->handleNativeEvent(eventType, message, result)) return true;
+        return QDialog::nativeEvent(eventType, message, result);
+    }
+
+private:
+    QString m_root;
+    QPlainTextEdit *m_text = nullptr;
+    DialogFrame *m_frame = nullptr;
+};
 
 class ScanRootsModel final : public QAbstractTableModel
 {
@@ -76,16 +117,23 @@ public:
         }
         endResetModel();
     }
-    void setStatus(const QString &root, const QString &details, const QString &summary,
-                   bool reviewRequired)
+    bool setStatus(const QString &root, const QString &details, const QString &summary,
+                   bool reviewRequired, const QString &lastReport)
     {
         const auto row = m_roots.indexOf(root);
-        const Status status{details, summary.isEmpty() ? details : summary, reviewRequired};
+        const Status status{details, summary.isEmpty() ? details : summary, reviewRequired, lastReport};
         if (row < 0 || m_statuses.value(root) == status)
-            return;
+            return false;
         m_statuses.insert(root, status);
         emit dataChanged(index(static_cast<int>(row), 0), index(static_cast<int>(row), 1),
             {Qt::DisplayRole, Qt::ToolTipRole, Qt::AccessibleTextRole});
+        return true;
+    }
+    QString scanInfo(const QString &root) const
+    {
+        const auto status = m_statuses.value(root);
+        return QStringLiteral("%1\n当前状态：%2\n\n%3")
+            .arg(root, status.summary, status.lastReport.isEmpty() ? status.details : status.lastReport);
     }
     int rowForRoot(const QString &root) const
     {
@@ -104,9 +152,10 @@ public:
     }
 private:
     struct Status {
-        QString details = QStringLiteral("尚未扫描");
+        QString details = QStringLiteral("本次启动尚未扫描");
         QString summary = QStringLiteral("尚未扫描");
         bool reviewRequired = false;
+        QString lastReport;
         bool operator==(const Status &) const = default;
     };
     QStringList m_roots;
@@ -153,16 +202,15 @@ ScanRootManagerDialog::ScanRootManagerDialog(QWidget *parent)
     m_contextMenu = menu;
     menu->setObjectName(QStringLiteral("scanRootsContextMenu"));
     menu->setToolTipsVisible(true);
+    m_scanInfo = menu->addAction(QStringLiteral("扫描信息"));
+    m_scanInfo->setObjectName(QStringLiteral("scanRootInfoAction"));
+    m_scanInfo->setToolTip(QStringLiteral("查看此目录本次启动以来最近一轮的扫描结果。"));
+    m_open = menu->addAction(QStringLiteral("打开目录"));
+    m_open->setObjectName(QStringLiteral("scanRootOpenAction"));
+    menu->addSeparator();
     m_remove = menu->addAction(QStringLiteral("移除扫描目录"));
     m_remove->setObjectName(QStringLiteral("scanRootRemoveAction"));
     m_remove->setToolTip(QStringLiteral("仅停止扫描，保留作品和本地文件。"));
-    menu->addSeparator();
-    m_reviewOverlaps = menu->addAction(QStringLiteral("查看重叠项"));
-    m_reviewOverlaps->setObjectName(QStringLiteral("scanRootReviewOverlapsAction"));
-    m_reviewOverlaps->setToolTip(QStringLiteral("预览所选目录的父子目录重叠项，确认后再导入。"));
-    menu->addSeparator();
-    m_open = menu->addAction(QStringLiteral("打开目录"));
-    m_open->setObjectName(QStringLiteral("scanRootOpenAction"));
     m_reviewPending = new QPushButton(this);
     m_reviewPending->setObjectName(QStringLiteral("scanRootsReviewPendingButton"));
     m_reviewPending->setToolTip(QStringLiteral("有重叠项等待确认，查看后选择需要导入的目录。"));
@@ -192,6 +240,7 @@ ScanRootManagerDialog::ScanRootManagerDialog(QWidget *parent)
 
     m_dialogFrame = new DialogFrame(this, layout);
     connect(buttons, &QDialogButtonBox::rejected, this, &QDialog::reject);
+    connect(m_model, &QAbstractItemModel::modelAboutToBeReset, menu, &QWidget::close);
     connect(m_table->selectionModel(), &QItemSelectionModel::currentChanged,
             this, [this] { m_contextMenu->close(); updateActions(); });
     connect(m_add, &QPushButton::clicked, this, [this] {
@@ -201,9 +250,12 @@ ScanRootManagerDialog::ScanRootManagerDialog(QWidget *parent)
         const QString root = selectedRoot();
         if (!m_busy && !root.isEmpty()) emit removeRootRequested(root);
     });
-    connect(m_reviewOverlaps, &QAction::triggered, this, [this] {
+    connect(m_scanInfo, &QAction::triggered, this, [this] {
         const QString root = selectedRoot();
-        if (!m_busy && !root.isEmpty()) emit reviewOverlapsRequested(root);
+        if (!isVisible() || root.isEmpty()) return;
+        if (!m_infoDialog) m_infoDialog = new ScanRootInfoDialog(this);
+        m_infoDialog->setReport(root, m_model->scanInfo(root));
+        m_infoDialog->open();
     });
     connect(m_open, &QAction::triggered, this, [this] {
         const QString root = selectedRoot();
@@ -236,7 +288,6 @@ bool ScanRootManagerDialog::eventFilter(QObject *watched, QEvent *event)
 {
     if ((watched == m_table || watched == m_table->viewport()) && event->type() == QEvent::ContextMenu) {
         auto *context = static_cast<QContextMenuEvent *>(event);
-        if (m_busy) return true;
         QPoint position;
         if (context->reason() == QContextMenuEvent::Keyboard) {
             if (selectedRoot().isEmpty()) return true;
@@ -258,6 +309,7 @@ bool ScanRootManagerDialog::eventFilter(QObject *watched, QEvent *event)
 void ScanRootManagerDialog::hideEvent(QHideEvent *event)
 {
     m_contextMenu->close();
+    if (m_infoDialog) m_infoDialog->reject();
     QDialog::hideEvent(event);
     emit hidden();
 }
@@ -271,11 +323,12 @@ bool ScanRootManagerDialog::nativeEvent(const QByteArray &eventType, void *messa
 
 void ScanRootManagerDialog::setConfiguration(const QStringList &roots, bool startupEnabled)
 {
-    m_contextMenu->close();
     const QString previousRoot = selectedRoot();
     const QSignalBlocker selectionBlocker(m_table->selectionModel());
     const QSignalBlocker startupBlocker(m_startup);
     m_model->setRoots(roots);
+    if (m_infoDialog && m_infoDialog->isVisible() && !roots.contains(m_infoDialog->root()))
+        m_infoDialog->reject();
     m_startup->setChecked(startupEnabled);
     const int row = m_model->rowForRoot(previousRoot);
     if (row >= 0)
@@ -288,8 +341,8 @@ void ScanRootManagerDialog::setConfiguration(const QStringList &roots, bool star
 
 void ScanRootManagerDialog::setBusy(bool busy)
 {
+    if (busy && !m_busy) m_contextMenu->close();
     m_busy = busy;
-    if (busy) m_contextMenu->close();
     updateActions();
 }
 
@@ -299,9 +352,12 @@ void ScanRootManagerDialog::setRootStatus(const QString &root, const QString &te
 }
 
 void ScanRootManagerDialog::setRootStatus(const QString &root, const QString &details,
-                                           const QString &summary, bool reviewRequired)
+                                           const QString &summary, bool reviewRequired,
+                                           const QString &lastReport)
 {
-    m_model->setStatus(root, details, summary, reviewRequired);
+    if (!m_model->setStatus(root, details, summary, reviewRequired, lastReport)) return;
+    if (m_infoDialog && m_infoDialog->isVisible() && m_infoDialog->root() == root)
+        m_infoDialog->setReport(root, m_model->scanInfo(root));
     updateActions();
 }
 
@@ -310,7 +366,7 @@ void ScanRootManagerDialog::updateActions()
     const bool selected = !selectedRoot().isEmpty();
     m_add->setEnabled(!m_busy);
     m_remove->setEnabled(!m_busy && selected);
-    m_reviewOverlaps->setEnabled(!m_busy && selected);
+    m_scanInfo->setEnabled(selected);
     m_open->setEnabled(!m_busy && selected);
     m_refreshAll->setEnabled(!m_busy && m_model->rowCount() > 0);
     m_startup->setEnabled(!m_busy);

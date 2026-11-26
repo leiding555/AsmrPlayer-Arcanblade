@@ -78,7 +78,9 @@ public:
     void setPlayingTrack(qint64 workId, qint64 fileId);
     void setQuerying(bool querying);
     void setImportAvailable(bool available);
-    void setImportState(LibraryImportState state, const QString &text, bool active, bool batch = false);
+    enum class TaskMode { SingleWork, BatchImport, RootRefresh };
+    void setImportState(LibraryImportState state, const QString &text, bool active,
+                        TaskMode mode = TaskMode::SingleWork);
     void setWorkRemovalActive(bool active);
     void setImportFeedback(const QString &text, const QString &details = {});
     void setImportError(const QString &message);
@@ -346,7 +348,6 @@ private:
     QPushButton *m_cancelButton = nullptr;
     QPushButton *m_welcomeImportButton = nullptr;
     QPushButton *m_welcomeAddScanRootButton = nullptr;
-    QLabel *m_queryLabel = nullptr;
     QLabel *m_errorLabel = nullptr;
     QLabel *m_workCountLabel = nullptr;
     QLabel *m_worksEmptyLabel = nullptr;
@@ -363,7 +364,7 @@ private:
     qint64 m_selectedWorkId = 0;
     LibraryImportState m_importState = LibraryImportState::Idle;
     bool m_active = false;
-    bool m_batchImportMode = false;
+    TaskMode m_taskMode = TaskMode::SingleWork;
     bool m_workRemovalActive = false;
     bool m_querying = false;
     bool m_importAvailable = true;

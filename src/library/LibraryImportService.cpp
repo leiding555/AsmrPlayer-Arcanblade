@@ -2,6 +2,7 @@
 #include "library/WorkDirectoryDiscovery.h"
 #include "library/SubtitleTranslationCleanup.h"
 #include "library/WorkReferenceRepository.h"
+#include "playback/LibrarySubtitleResolver.h"
 #include "subtitle/GeneratedSubtitleInfo.h"
 
 #include <QDir>
@@ -149,7 +150,6 @@ private:
         QElapsedTimer timer;
         timer.start();
         result.matches = SubtitleMatcher::match(snapshot.work, snapshot.files);
-        result.matchingElapsedNs = timer.nsecsElapsed();
         QVector<AutoSubtitleBinding> bindings;
         const auto partners = SubtitleMatcher::sharedAudioPartners(snapshot.work, snapshot.files);
         QSet<QPair<qint64, qint64>> bindingPairs;
@@ -193,6 +193,7 @@ private:
                 addSharedBindings(audioId, file.id);
             }
         }
+        QSet<qint64> tracksWithRecommendations;
         for (const auto &track : result.matches.tracks) {
             for (const auto &candidate : track.candidates) {
                 ++result.candidateCount;
@@ -200,8 +201,41 @@ private:
                     continue;
                 if (candidate.autoAssociationAllowed) {
                     addSharedBindings(track.audioFileId, candidate.subtitleFileId);
-                } else if (candidate.rule == SubtitleMatchRule::TrackNumberOnly
-                           || candidate.numberOnly || !candidate.recommended) {
+                } else if (candidate.recommended) {
+                    tracksWithRecommendations.insert(track.audioFileId);
+                }
+            }
+        }
+        LibraryAutomaticSubtitleTracksResult automatic;
+        QVector<AutoSubtitleBinding> recommendations;
+        if (!tracksWithRecommendations.isEmpty()) {
+            automatic = repository.automaticSubtitleTracks(result.workId);
+            if (!automatic.success) {
+                result.diagnostics = automatic.diagnostics;
+                return;
+            }
+            QHash<qint64, QSet<qint64>> planned;
+            for (const auto audioId : std::as_const(tracksWithRecommendations)) {
+                const auto existing = automatic.boundSubtitleIds.constFind(audioId);
+                if (existing != automatic.boundSubtitleIds.cend()) planned.insert(audioId, *existing);
+            }
+            for (const auto &binding : std::as_const(bindings)) {
+                const auto track = planned.find(binding.audioFileId);
+                if (track != planned.end()) track->insert(binding.subtitleFileId);
+            }
+            recommendations = recommendedScanBindings(snapshot.work, snapshot.files, result.matches,
+                                                      planned, generatedAudio);
+            for (const auto &binding : std::as_const(recommendations))
+                bindingPairs.insert({binding.audioFileId, binding.subtitleFileId});
+            result.eligibleBindings += recommendations.size();
+        }
+        for (const auto &track : result.matches.tracks) {
+            for (const auto &candidate : track.candidates) {
+                if (generatedAudio.contains(candidate.subtitleFileId)
+                    || bindingPairs.contains({track.audioFileId, candidate.subtitleFileId}))
+                    continue;
+                if (candidate.rule == SubtitleMatchRule::TrackNumberOnly
+                    || candidate.numberOnly || !candidate.recommended) {
                     ++result.skippedWeakCandidates;
                 } else {
                     ++result.skippedAmbiguousCandidates;
@@ -212,11 +246,13 @@ private:
                 }
             }
         }
+        result.matchingElapsedNs = timer.nsecsElapsed();
         reached(LibraryImportService::TestPoint::AfterMatching);
         // Matching holds no SQL transaction. The batch locks and compares the
         // whole snapshot again before its first write, including empty batches.
         timer.start();
-        const auto applied = repository.addAutoSubtitleBindings(snapshot, bindings);
+        const auto applied = repository.addAutoSubtitleBindings(snapshot, bindings, recommendations,
+                                                               automatic.boundSubtitleIds);
         result.bindingElapsedNs = timer.nsecsElapsed();
         result.diagnostics = applied.diagnostics;
         if (applied.success) {

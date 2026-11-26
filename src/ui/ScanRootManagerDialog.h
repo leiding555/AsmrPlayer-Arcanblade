@@ -14,6 +14,7 @@ class QTableView;
 namespace asmr {
 
 class ScanRootsModel;
+class ScanRootInfoDialog;
 class DialogFrame;
 
 // Presentation only. The owner persists configuration and schedules work;
@@ -28,8 +29,8 @@ public:
     void setConfiguration(const QStringList &roots, bool startupEnabled);
     void setBusy(bool busy);
     void setRootStatus(const QString &root, const QString &text);
-    void setRootStatus(const QString &root, const QString &details,
-                       const QString &summary, bool reviewRequired = false);
+    void setRootStatus(const QString &root, const QString &details, const QString &summary,
+                       bool reviewRequired = false, const QString &lastReport = {});
 
 signals:
     void addRootRequested();
@@ -55,7 +56,8 @@ private:
     QPushButton *m_add = nullptr;
     QAction *m_remove = nullptr;
     QPushButton *m_refreshAll = nullptr;
-    QAction *m_reviewOverlaps = nullptr;
+    QAction *m_scanInfo = nullptr;
+    ScanRootInfoDialog *m_infoDialog = nullptr;
     QMenu *m_contextMenu = nullptr;
     QAction *m_open = nullptr;
     QPushButton *m_reviewPending = nullptr;

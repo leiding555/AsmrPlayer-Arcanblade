@@ -14,6 +14,7 @@
 #include <QVariant>
 
 #include <initializer_list>
+#include <utility>
 
 namespace asmr {
 namespace {
@@ -383,9 +384,46 @@ LibraryWorkBrowseResult LibraryRepository::readWorkSnapshot(qint64 workId, bool 
     return result;
 }
 
+LibraryAutomaticSubtitleTracksResult LibraryRepository::automaticSubtitleTracks(qint64 workId)
+{
+    LibraryAutomaticSubtitleTracksResult result;
+    const auto ready = checkReady();
+    if (!ready.success) {
+        result.diagnostics = ready.diagnostics;
+        return result;
+    }
+    if (workId <= 0)
+        return failure<LibraryAutomaticSubtitleTracksResult>(LibraryDiagnosticCode::InvalidWorkSnapshot,
+            m_databasePath, QStringLiteral("A positive work ID is required for automatic subtitle selection."));
+    QSqlQuery query(m_database);
+    if (!query.prepare(QStringLiteral(
+            "SELECT a.id, b.subtitle_file_id FROM work_files a "
+            "LEFT JOIN subtitle_bindings b ON b.audio_file_id = a.id "
+            "WHERE a.work_id = ? AND a.type = 0 AND a.missing = 0 AND NOT EXISTS "
+            "(SELECT 1 FROM track_subtitle_preferences p WHERE p.audio_file_id = a.id)"))) {
+        return failure<LibraryAutomaticSubtitleTracksResult>(LibraryDiagnosticCode::DatabaseError,
+            m_databasePath, sqlMessage(QStringLiteral("Prepare automatic subtitle tracks"), query.lastError()));
+    }
+    query.addBindValue(workId);
+    if (query.exec()) {
+        while (query.next()) {
+            auto &bindings = result.boundSubtitleIds[query.value(0).toLongLong()];
+            if (!query.isNull(1)) bindings.insert(query.value(1).toLongLong());
+        }
+        if (!query.lastError().isValid()) {
+            result.success = true;
+            return result;
+        }
+    }
+    return failure<LibraryAutomaticSubtitleTracksResult>(LibraryDiagnosticCode::DatabaseError,
+        m_databasePath, sqlMessage(QStringLiteral("Read automatic subtitle tracks"), query.lastError()));
+}
+
 LibraryAutoBindingResult LibraryRepository::addAutoSubtitleBindings(
     const LibraryWorkSnapshotResult &expectedSnapshot,
-    const QVector<AutoSubtitleBinding> &bindings)
+    const QVector<AutoSubtitleBinding> &bindings,
+    const QVector<AutoSubtitleBinding> &recommendations,
+    const QHash<qint64, QSet<qint64>> &expectedAutomaticBindings)
 {
     LibraryAutoBindingResult counts;
     const auto written = writeSubtitleChange([&]() -> LibraryOperationResult {
@@ -396,7 +434,7 @@ LibraryAutoBindingResult LibraryRepository::addAutoSubtitleBindings(
         // This JOIN is read only after BEGIN IMMEDIATE has acquired the writer.
         // Include missing historical records and every raw work/file field, so
         // added, missing, restored, renamed or reassigned records reject stale
-        // suggestions. User bindings/preferences intentionally are not compared.
+        // suggestions. Strict associations preserve concurrent manual settings.
         const auto current = workSnapshot(expectedSnapshot.work.id);
         if (!current.success) {
             for (const auto &diagnostic : current.diagnostics) {
@@ -414,13 +452,25 @@ LibraryAutoBindingResult LibraryRepository::addAutoSubtitleBindings(
                            QStringLiteral("The work snapshot changed; automatic suggestions were not applied."));
         }
 
+        QVector<AutoSubtitleBinding> pending = bindings;
+        if (!recommendations.isEmpty()) {
+            const auto automatic = automaticSubtitleTracks(current.work.id);
+            if (!automatic.success) return {false, automatic.diagnostics};
+            for (const auto &recommendation : recommendations) {
+                const auto expected = expectedAutomaticBindings.constFind(recommendation.audioFileId);
+                const auto actual = automatic.boundSubtitleIds.constFind(recommendation.audioFileId);
+                if (expected != expectedAutomaticBindings.cend() && actual != automatic.boundSubtitleIds.cend()
+                    && *actual == *expected)
+                    pending.append(recommendation);
+            }
+        }
         QHash<qint64, const LibraryFile *> filesById;
         for (const auto &file : current.files)
             filesById.insert(file.id, &file);
         QVector<AutoSubtitleBinding> uniqueBindings;
         QSet<QPair<qint64, qint64>> seen;
         // Validate the entire deduplicated batch before the first mutation.
-        for (const auto &binding : bindings) {
+        for (const auto &binding : std::as_const(pending)) {
             const QPair<qint64, qint64> pair{binding.audioFileId, binding.subtitleFileId};
             if (seen.contains(pair))
                 continue;
@@ -500,35 +550,6 @@ LibraryAutoBindingResult LibraryRepository::addAutoSubtitleBindings(
     }
     counts.success = true;
     return counts;
-}
-
-LibraryOperationResult LibraryRepository::bindRecommendedSubtitle(
-    const LibraryTrackSubtitlesResult &expected, qint64 subtitleFileId)
-{
-    return writeSubtitleChange([&]() -> LibraryOperationResult {
-        if (!expected.success || expected.preference.state != SubtitlePreferenceState::Unset)
-            return failure(LibraryDiagnosticCode::InvalidSubtitleBinding, m_databasePath,
-                           QStringLiteral("只有自动选择字幕的音轨可以补充推荐关联。"));
-        const auto work = workSnapshot(expected.work.id);
-        const auto bindings = subtitleBindings(expected.audio.id);
-        const auto preference = subtitlePreference(expected.audio.id);
-        if (!work.success || !bindings.success || !preference.success)
-            return {false, work.diagnostics + bindings.diagnostics + preference.diagnostics};
-        if (work.work != expected.work || work.files != expected.files
-            || bindings.bindings != expected.bindings || preference.preference != expected.preference)
-            return failure(LibraryDiagnosticCode::StaleWorkSnapshot, m_databasePath,
-                           QStringLiteral("音轨或字幕设置已更新，需重新选择。"));
-        if (!work.files.contains(expected.audio))
-            return failure(LibraryDiagnosticCode::InvalidSubtitleBinding, m_databasePath,
-                           QStringLiteral("推荐字幕的音轨不属于当前作品。"));
-        const auto valid = validateBindingPair(m_database, m_databasePath, expected.audio.id, subtitleFileId, true);
-        if (!valid.success)
-            return valid;
-        return executeChange(m_database, m_databasePath, QStringLiteral("Bind recommended subtitle"),
-                             QStringLiteral("INSERT INTO subtitle_bindings(audio_file_id, subtitle_file_id, source) "
-                                            "VALUES (?, ?, ?) ON CONFLICT(audio_file_id, subtitle_file_id) DO NOTHING"),
-                             {expected.audio.id, subtitleFileId, static_cast<int>(SubtitleBindingSource::Auto)});
-    });
 }
 
 LibraryOperationResult LibraryRepository::bindSubtitle(

@@ -54,7 +54,8 @@ void MainWindow::connectBatchImport()
             : m_libraryImportState == LibraryImportState::Committing
                     && state == LibraryBatchImportState::Importing
                 ? LibraryImportState::Committing : LibraryImportState::Scanning;
-        m_libraryPanel->setImportState(displayed, text, m_libraryBatchImportService->isActive(), true);
+        m_libraryPanel->setImportState(displayed, text, m_libraryBatchImportService->isActive(),
+                                       LibraryPanel::TaskMode::BatchImport);
         updateScanRootManager();
     });
     connect(m_libraryBatchImportService, &LibraryBatchImportService::finished,

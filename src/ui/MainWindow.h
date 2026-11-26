@@ -624,6 +624,7 @@ private:
     struct ScanRootPresentation {
         QString summary;
         bool reviewRequired = false;
+        QString lastReport;
     };
     QHash<QString, ScanRootPresentation> m_scanRootPresentations;
     QSet<qint64> m_removedLibraryWorkIds; // Invalidates this window's obsolete asynchronous requests.

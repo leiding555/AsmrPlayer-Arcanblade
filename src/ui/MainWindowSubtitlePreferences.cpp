@@ -123,7 +123,9 @@ SubtitleChoices readChoices(const QString &path, qint64 workId, qint64 audioId)
             }
             item.matchReason = rule + QStringLiteral("；规则分 %1；目录距离 %2")
                 .arg(candidate->ruleScore).arg(candidate->directoryDistance);
-            if (candidate->numberOnly)
+            if (candidate->numberOnly && candidate->recommended)
+                item.matchReason += QStringLiteral("；同目录数字文件名完全相同");
+            else if (candidate->numberOnly)
                 item.matchReason += QStringLiteral("；纯编号，需人工核实");
             if (candidate->ambiguousVersion)
                 item.matchReason += QStringLiteral("；版本歧义");

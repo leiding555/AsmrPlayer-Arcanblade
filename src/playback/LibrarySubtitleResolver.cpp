@@ -187,13 +187,12 @@ LibrarySubtitleResolution resolveLibrarySubtitles(const QString &databasePath,
         result.snapshot.success = false;
         result.snapshot.diagnostics += closed.diagnostics;
     }
-    auto selected = selectLibrarySubtitles(databasePath, std::move(result.snapshot));
+    auto selected = selectLibrarySubtitles(std::move(result.snapshot));
     selected.pruned = result.pruned;
     return selected;
 }
 
-namespace {
-LibrarySubtitleResolution selectBoundSubtitles(LibraryTrackSubtitlesResult snapshotResult)
+LibrarySubtitleResolution selectLibrarySubtitles(LibraryTrackSubtitlesResult snapshotResult)
 {
     LibrarySubtitleResolution result;
     result.snapshot = std::move(snapshotResult);
@@ -250,8 +249,7 @@ LibrarySubtitleResolution selectBoundSubtitles(LibraryTrackSubtitlesResult snaps
             });
             if (usable != available.cend())
                 result.selectedFile = usable->second;
-            else
-                result.decision = LibrarySubtitleDecision::NoAvailable;
+            // If all fail, the normal loader reports the highest-ranked binding's error.
         }
     } else if (snapshot.preference.state == SubtitlePreferenceState::Subtitle) {
         result.decision = LibrarySubtitleDecision::Error;
@@ -263,74 +261,48 @@ LibrarySubtitleResolution selectBoundSubtitles(LibraryTrackSubtitlesResult snaps
     return result;
 }
 
-qint64 firstUsableRecommendation(const LibraryTrackSubtitlesResult &snapshot)
+QVector<AutoSubtitleBinding> recommendedScanBindings(
+    const LibraryWork &work, const QVector<LibraryFile> &files, const SubtitleMatchResult &matches,
+    const QHash<qint64, QSet<qint64>> &boundByAudio, const QHash<qint64, qint64> &generatedAudio)
 {
+    if (boundByAudio.isEmpty() || matches.workId != work.id) return {};
     QHash<qint64, const LibraryFile *> subtitles;
-    for (const auto &file : snapshot.files)
-        if (file.type == LibraryFileType::Subtitle && !file.missing)
+    for (const auto &file : files)
+        if (file.type == LibraryFileType::Subtitle && file.workId == work.id && !file.missing)
             subtitles.insert(file.id, &file);
-    for (const auto &binding : snapshot.bindings)
-        subtitles.remove(binding.subtitleFileId);
-    if (subtitles.isEmpty())
-        return 0;
 
-    const bool flac = snapshot.audio.extension.compare(u"flac", Qt::CaseInsensitive) == 0;
-    const auto ranked = SubtitleMatcher::rankedRecommendations(snapshot.work, snapshot.files, snapshot.audio.id);
-    for (const auto &candidate : ranked) {
-        const auto *file = subtitles.value(candidate.subtitleFileId);
-        if (!file) continue;
-        const auto generation = readGeneratedSubtitleInfo(QDir(snapshot.work.rootPath).filePath(file->relativePath));
-        const bool competing = !candidate.competingAudioFileIds.isEmpty();
-        if (generation && (flac || competing
-                || QFileInfo(generation->audioFileName).suffix().compare(u"flac", Qt::CaseInsensitive) == 0)) {
-            // Generated SRTs live one directory below their original audio.
-            const auto audio = QDir::cleanPath(QFileInfo(file->relativePath).path()
-                + QStringLiteral("/../") + generation->audioFileName);
-#ifdef Q_OS_WIN
-            if (audio.compare(snapshot.audio.relativePath, Qt::CaseInsensitive) != 0) continue;
-#else
-            if (audio != snapshot.audio.relativePath) continue;
-#endif
-        } else if (competing || (flac && candidate.ambiguousVersion)) {
+    // One subtitle can serve multiple tracks. Cache parse results for this scan only.
+    QHash<qint64, bool> playable;
+    const auto isPlayable = [&](qint64 id) {
+        const auto cached = playable.constFind(id);
+        if (cached != playable.cend()) return *cached;
+        const auto *file = subtitles.value(id);
+        const bool usable = file && loadLibrarySubtitle(work.rootPath, *file).succeeded();
+        playable.insert(id, usable);
+        return usable;
+    };
+
+    QVector<AutoSubtitleBinding> additions;
+    for (const auto &track : matches.tracks) {
+        const auto bound = boundByAudio.constFind(track.audioFileId);
+        if (bound == boundByAudio.cend()) continue;
+        const auto eligible = [&](const SubtitleMatchCandidate &candidate) {
+            // Generated subtitles have already been handled using the recorded source.
+            return candidate.recommended && !candidate.flacOwnershipConflict
+                && !bound->contains(candidate.subtitleFileId) && !generatedAudio.contains(candidate.subtitleFileId);
+        };
+        auto candidate = std::find_if(track.candidates.cbegin(), track.candidates.cend(), eligible);
+        if (candidate == track.candidates.cend() || std::any_of(bound->cbegin(), bound->cend(), isPlayable))
             continue;
-        }
-        if (loadLibrarySubtitle(snapshot.work.rootPath, *file).succeeded())
-            return file->id;
-    }
-    return 0;
-}
-}
-
-LibrarySubtitleResolution selectLibrarySubtitles(const QString &databasePath, LibraryTrackSubtitlesResult snapshot)
-{
-    auto result = selectBoundSubtitles(std::move(snapshot));
-    LibraryRepository writer(databasePath, LibraryRepository::Access::ReadWriteExisting);
-    // Retry a superseded snapshot once, recomputing the recommendation under the new settings.
-    for (int attempt = 0; attempt < 2 && result.decision == LibrarySubtitleDecision::NoAvailable; ++attempt) {
-        const auto subtitleId = firstUsableRecommendation(result.snapshot);
-        if (!subtitleId) break;
-        auto saved = writer.open();
-        if (saved.success)
-            saved = writer.bindRecommendedSubtitle(result.snapshot, subtitleId);
-        const bool stale = std::any_of(saved.diagnostics.cbegin(), saved.diagnostics.cend(), [](const auto &issue) {
-            return issue.code == LibraryDiagnosticCode::StaleWorkSnapshot;
-        });
-        if (!saved.success && !stale) {
-            result.snapshot.success = false;
-            result.snapshot.diagnostics = saved.diagnostics;
-            return selectBoundSubtitles(std::move(result.snapshot));
-        }
-        result = selectBoundSubtitles(writer.trackSubtitles(result.snapshot.work.id, result.snapshot.audio.id));
-        if (saved.success) {
-            result.boundRecommendation = true;
-            break;
+        // Candidates are in the same order as the subtitle management dialog.
+        for (; candidate != track.candidates.cend(); ++candidate) {
+            if (eligible(*candidate) && isPlayable(candidate->subtitleFileId)) {
+                additions.push_back({track.audioFileId, candidate->subtitleFileId});
+                break;
+            }
         }
     }
-    // If all bindings failed to parse and there was no usable replacement,
-    // let the normal loader report the highest-ranked binding's error.
-    if (result.decision == LibrarySubtitleDecision::NoAvailable && result.selectedFile.id > 0)
-        result.decision = LibrarySubtitleDecision::Selected;
-    return result;
+    return additions;
 }
 
 SubtitleFileLoadResult loadLibrarySubtitle(const QString &root, const LibraryFile &file)

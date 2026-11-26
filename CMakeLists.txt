@@ -134,6 +134,8 @@ add_library(AsmrLibrary STATIC
     src/library/LibraryBatchImportService.cpp
     src/library/SubtitleMatcher.h
     src/library/SubtitleMatcher.cpp
+    src/playback/LibrarySubtitleResolver.h
+    src/playback/LibrarySubtitleResolver.cpp
     src/library/LibraryRepository.h
     src/library/SqliteWriteTransaction.h
     src/library/SqliteWriteTransaction.cpp
@@ -316,8 +318,6 @@ set(_library_subtitle_playback_sources
     src/ui/MainWindowTrackDurations.cpp
     src/ui/PlaybackQueuePanel.h
     src/ui/PlaybackQueuePanel.cpp
-    src/playback/LibrarySubtitleResolver.h
-    src/playback/LibrarySubtitleResolver.cpp
     src/ui/MainWindowLibrarySubtitles.cpp
     src/ui/MainWindowPlaybackProgress.cpp
     src/ui/MainWindowSubtitlePreferences.cpp
@@ -427,7 +427,6 @@ add_library(AsmrMobilePlayback STATIC
     src/ui/MobilePlaybackDialog.cpp
     src/third_party/qrcodegen/qrcodegen.cpp
     src/playback/AudioFileValidation.cpp
-    src/playback/LibrarySubtitleResolver.cpp
 )
 target_include_directories(AsmrMobilePlayback PUBLIC src)
 target_include_directories(AsmrMobilePlayback SYSTEM PRIVATE src/third_party/cpp-httplib src/third_party/qrcodegen)

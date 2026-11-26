@@ -151,9 +151,9 @@ QList<LibraryFile> sortedTracks(const LibraryWorkSnapshotResult &snapshot)
     return result;
 }
 
-QJsonObject subtitlePayload(const QString &databasePath, LibraryTrackSubtitlesResult snapshot)
+QJsonObject subtitlePayload(LibraryTrackSubtitlesResult snapshot)
 {
-    const auto selection = selectLibrarySubtitles(databasePath, std::move(snapshot));
+    const auto selection = selectLibrarySubtitles(std::move(snapshot));
     QString state = QStringLiteral("none");
     QJsonArray entries;
     if (selection.decision == LibrarySubtitleDecision::Disabled) {
@@ -323,7 +323,7 @@ struct MobilePlaybackService::Run {
             return;
         }
         repository.close();
-        json(response, subtitlePayload(library.databasePath, std::move(snapshot)));
+        json(response, subtitlePayload(std::move(snapshot)));
     }
 
     void audio(const Request &request, qint64 workId, qint64 trackId, Response &response)
@@ -463,7 +463,7 @@ struct MobilePlaybackService::Run {
                     if (!audioFile || !zip.add(audioName, audioFile->size(), [&](qint64 size) {
                         return active() ? audioFile->read(size) : QByteArray{};
                     })) return false;
-                    const auto cues = QJsonDocument(subtitlePayload(library.databasePath, std::move(subtitle))).toJson(QJsonDocument::Compact);
+                    const auto cues = QJsonDocument(subtitlePayload(std::move(subtitle))).toJson(QJsonDocument::Compact);
                     if (!zip.add(subtitleName, cues)) return false;
                     tracks.append(QJsonObject{{QStringLiteral("id"), QString::number(file.id)},
                         {QStringLiteral("name"), file.fileName},

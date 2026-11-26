@@ -1060,15 +1060,11 @@ LibraryPanel::LibraryPanel(QWidget *parent)
         [this] { scheduleWorkCoverDemand(); });
 
     m_statusText = QStringLiteral("尚未导入作品目录");
-    m_queryLabel = plainLabel(QStringLiteral("libraryQueryStateLabel"), sidebar);
     m_errorLabel = plainLabel(QStringLiteral("libraryErrorLabel"), sidebar);
     m_errorLabel->setProperty("errorLabel", true);
-    for (auto *label : {m_queryLabel, m_errorLabel}) {
-        // Keep long task paths accessible without growing the permanent footer.
-        label->setWordWrap(false);
-        label->setSizePolicy(QSizePolicy::Ignored, QSizePolicy::Fixed);
-        label->setProperty("subtleLabel", true);
-    }
+    m_errorLabel->setWordWrap(false);
+    m_errorLabel->setSizePolicy(QSizePolicy::Ignored, QSizePolicy::Fixed);
+    m_errorLabel->setProperty("subtleLabel", true);
     auto *sidebarLayout = new QVBoxLayout(sidebar);
     sidebarLayout->setContentsMargins(16, 4, 16, 16);
     sidebarLayout->setSpacing(12);
@@ -1083,7 +1079,6 @@ LibraryPanel::LibraryPanel(QWidget *parent)
     sidebarLayout->addWidget(m_workSearchEdit);
     sidebarLayout->addWidget(m_categoryNavigation);
     sidebarLayout->addWidget(m_worksStack, 1);
-    sidebarLayout->addWidget(m_queryLabel);
     sidebarLayout->addWidget(m_errorLabel);
     auto *taskActions = new QBoxLayout(QBoxLayout::TopToBottom);
     taskActions->setObjectName(QStringLiteral("libraryTaskActionsLayout"));
@@ -2707,12 +2702,12 @@ void LibraryPanel::setImportAvailable(bool available)
     updatePresentation();
 }
 
-void LibraryPanel::setImportState(LibraryImportState state, const QString &text, bool active, bool batch)
+void LibraryPanel::setImportState(LibraryImportState state, const QString &text, bool active, TaskMode mode)
 {
     if (m_active != active) invalidateWorkContextMenu();
     m_importState = state;
     m_active = active;
-    m_batchImportMode = batch;
+    m_taskMode = mode;
     m_statusText = text;
     if (!active && state == LibraryImportState::Failed)
         m_taskErrorText = text;
@@ -3114,18 +3109,19 @@ void LibraryPanel::updatePresentation()
     m_welcomeAddScanRootButton->setToolTip(m_addScanRootAction->toolTip());
     m_manageScanRootsAction->setEnabled(m_importAvailable && !m_closing);
     m_refreshScanRootsButton->setEnabled(importEnabled);
-    m_cancelButton->setVisible(m_active);
+    const bool showCancel = m_active && m_taskMode != TaskMode::RootRefresh;
+    m_cancelButton->setVisible(showCancel);
     m_importAction->setToolTip(m_active
-        ? QStringLiteral("已有导入任务正在运行，请等待完成或取消。")
+        ? QStringLiteral("作品库任务正在运行，请等待完成。")
         : QStringLiteral("递归发现作品内音频、字幕及参考资料，后台导入作品库并缓存资料正文。"));
     m_welcomeImportButton->setToolTip(m_importAction->toolTip());
-    m_cancelButton->setEnabled(m_active && !m_closing
+    m_cancelButton->setEnabled(showCancel && !m_closing
         && m_importState != LibraryImportState::Cancelling);
     m_cancelButton->setToolTip(m_workRemovalActive
         ? (m_importState == LibraryImportState::Committing
             ? QStringLiteral("数据库正在原子提交；收到删除结果前请等待完成。")
             : QStringLiteral("请求取消删除作品；本地媒体文件不会删除。"))
-        : m_batchImportMode
+        : m_taskMode == TaskMode::BatchImport
         ? QStringLiteral("停止后续作品；当前仍在扫描时请求取消；已开始的提交或字幕关联将等待完成，再结束批次。")
         : m_importState == LibraryImportState::Committing
             ? QStringLiteral("数据库正在原子提交；此阶段取消将提示无法取消。")
@@ -3173,8 +3169,6 @@ void LibraryPanel::updatePresentation()
         button->setEnabled(canNavigate && (button == m_breadcrumbOverflowButton
             || (button == m_breadcrumbRootButton ? !m_currentDirectory.isEmpty() : path != m_currentDirectory)));
     }
-    m_queryLabel->setVisible(m_querying);
-    m_queryLabel->setText(QStringLiteral("正在读取作品库…"));
     m_errorLabel->setText(m_libraryErrorText.isEmpty() ? m_taskErrorText : m_libraryErrorText);
     m_errorLabel->setVisible(!m_errorLabel->text().isEmpty());
     const int workCount = m_worksModel->rowCount();
@@ -3219,21 +3213,13 @@ void LibraryPanel::updatePresentation()
     m_sidebar->findChild<QLabel *>(QStringLiteral("applicationTitle"))->setVisible(m_applicationTitleVisible);
     m_workCountLabel->setVisible(true);
     const QString cancelName = m_workRemovalActive ? QStringLiteral("取消删除")
-        : m_batchImportMode ? QStringLiteral("停止批次") : QStringLiteral("取消扫描");
+        : m_taskMode == TaskMode::BatchImport ? QStringLiteral("停止批次") : QStringLiteral("取消扫描");
     m_cancelButton->setAccessibleName(cancelName);
     m_cancelButton->setText(compact ? QStringLiteral("停止") : cancelName);
     QStringList footerDetails;
     if (!m_libraryErrorText.isEmpty()) footerDetails.append(m_libraryErrorText);
     if (!m_taskErrorText.isEmpty()) footerDetails.append(m_taskErrorText);
-    if (m_querying) footerDetails.append(m_queryLabel->text());
     m_errorLabel->setToolTip(safeToolTip(compact ? footerDetails.join(QLatin1Char('\n')) : m_errorLabel->text()));
-    if (compact) {
-        // Only real errors and an active library query use the footer. Task
-        // summaries and diagnostics have no persistent sidebar presentation.
-        const bool hasError = !m_errorLabel->text().isEmpty();
-        m_errorLabel->setVisible(hasError);
-        m_queryLabel->setVisible(!hasError && m_querying);
-    }
 }
 
 } // namespace asmr

@@ -7,7 +7,7 @@ namespace asmr {
 struct ScanRootChangeResult { bool success = false; QString root; QString errorMessage; };
 struct ScanRootSnapshot {
     QStringList roots;
-    bool startupEnabled = true;
+    bool startupEnabled = false;
     QString errorMessage;
 };
 struct ScanRootPruneResult {

@@ -5,6 +5,7 @@
 #include "library/WorkCategoryTypes.h"
 
 #include <QSqlDatabase>
+#include <QHash>
 #include <QSet>
 #include <QString>
 #include <QVector>
@@ -126,6 +127,11 @@ struct LibraryAutoBindingResult : LibraryOperationResult {
     qsizetype insertedBindings = 0;
     qsizetype existingBindings = 0; // Includes preserved Manual relationships.
     qsizetype manualBindingsPreserved = 0;
+};
+
+struct LibraryAutomaticSubtitleTracksResult : LibraryOperationResult {
+    // Every present track in automatic mode, including those with no bindings.
+    QHash<qint64, QSet<qint64>> boundSubtitleIds;
 };
 
 struct LibraryWorkArtworkResult : LibraryOperationResult {
@@ -273,15 +279,20 @@ public:
         const QString &title, const QString &relativePath, const QString &managedFile,
         const std::function<LibraryOperationResult()> &beforeSave = {});
 
+    LibraryAutomaticSubtitleTracksResult automaticSubtitleTracks(qint64 workId);
     // Add-only atomic batch, intended for allowed SubtitleMatcher suggestions.
     // Rechecks the exact complete snapshot under a SQLite write lock before any
     // mutation. Pass an unmodified workSnapshot result, including its file order.
     // Missing endpoints are rejected. Duplicate pairs count once;
     // existing Manual sources and every preference decision remain unchanged.
     // Failure reports zero mutation counters, even after a rolled-back insert.
+    // A fallback is applied only while its track remains in automatic mode
+    // with exactly the bindings observed before checking files on disk.
     LibraryAutoBindingResult addAutoSubtitleBindings(
         const LibraryWorkSnapshotResult &expectedSnapshot,
-        const QVector<AutoSubtitleBinding> &bindings);
+        const QVector<AutoSubtitleBinding> &bindings,
+        const QVector<AutoSubtitleBinding> &recommendations = {},
+        const QHash<qint64, QSet<qint64>> &expectedAutomaticBindings = {});
 
     // Pure input validation, without opening or changing a database. Existing
     // database identity conflicts still require importScan's transaction.
@@ -329,8 +340,6 @@ public:
         SubtitleBindingAvailabilityPolicy availabilityPolicy = SubtitleBindingAvailabilityPolicy::AllowMissing);
     LibrarySubtitleBindingsResult subtitleBindings(qint64 audioFileId);
     LibraryTrackSubtitlesResult trackSubtitles(qint64 workId, qint64 audioFileId);
-    LibraryOperationResult bindRecommendedSubtitle(const LibraryTrackSubtitlesResult &expected,
-                                                    qint64 subtitleFileId);
     // Worker-only filesystem check followed by a short atomic cleanup. Only
     // confirmed absent subtitle files are removed; offline or inaccessible
     // directories retain their records. Related bindings and explicit defaults

@@ -310,7 +310,7 @@ BoundSubtitleDialog::BoundSubtitleDialog(QWidget *parent)
     m_preferenceLabel->setWordWrap(true);
     m_restoreButton = new QPushButton(QStringLiteral("恢复默认"), this);
     m_restoreButton->setObjectName(QStringLiteral("automaticBoundSubtitleButton"));
-    m_restoreButton->setToolTip(QStringLiteral("自动使用最新可用的已关联字幕。没有可用关联时，绑定并使用第一份可用的推荐字幕。"));
+    m_restoreButton->setToolTip(QStringLiteral("播放时自动使用最新可用的已关联字幕。刷新作品可重新匹配并关联推荐字幕。"));
     m_contextMenu = new QMenu(this);
     m_contextMenu->setObjectName(QStringLiteral("boundSubtitleContextMenu"));
     m_contextMenu->setToolTipsVisible(true);
